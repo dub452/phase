@@ -11919,7 +11919,7 @@ mod tests {
     /// duration keeps the `Permanent` default.
     #[test]
     fn become_choice_window_precedence() {
-        let rows: [(&str, Option<Duration>, Option<Duration>, Option<Duration>); 3] = [
+        let rows = [
             (
                 "become the color of your choice until end of turn",
                 Some(Duration::UntilEndOfCombat),
