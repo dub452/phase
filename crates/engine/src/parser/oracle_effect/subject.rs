@@ -6321,10 +6321,12 @@ fn try_parse_become_choice(
     // CR 611.2a: the clause's PRINTED window — stripped here, or peeled upstream
     // and published on the context — reaches the apply half through
     // `with_clause_chain_duration`. See this function's doc.
-    Some(match stated_duration.or_else(|| ctx.stated_clause_duration.clone()) {
-        Some(d) => with_clause_chain_duration(clause, d),
-        None => clause,
-    })
+    Some(
+        match stated_duration.or_else(|| ctx.stated_clause_duration.clone()) {
+            Some(d) => with_clause_chain_duration(clause, d),
+            None => clause,
+        },
+    )
 }
 
 /// CR 119.7 + CR 119.8: Map the possessive subject of a "life total can't change"
@@ -8174,7 +8176,8 @@ mod tests {
     use super::*;
     use crate::types::ability::AttackerBlockStatus;
     use crate::types::ability::{
-        AbilityKind, BasicLandType, ContinuousModification, ControllerRef, Effect, TypeFilter,
+        AbilityKind, BasicLandType, ChoiceType, ContinuousModification, ControllerRef, Effect,
+        TypeFilter,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::statics::BlockExceptionKind;
@@ -11916,8 +11919,6 @@ mod tests {
     /// duration keeps the `Permanent` default.
     #[test]
     fn become_choice_window_precedence() {
-        use crate::types::ability::ChoiceType;
-
         let rows: [(&str, Option<Duration>, Option<Duration>, Option<Duration>); 3] = [
             (
                 "become the color of your choice until end of turn",

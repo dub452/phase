@@ -34,7 +34,9 @@
 
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::{ChosenSubtypeKind, ColorChangeMode, ContinuousModification, Duration};
+use engine::types::ability::{
+    ChosenSubtypeKind, ColorChangeMode, ContinuousModification, Duration,
+};
 use engine::types::actions::GameAction;
 use engine::types::game_state::{GameState, TransientContinuousEffect, WaitingFor};
 use engine::types::identifiers::ObjectId;
