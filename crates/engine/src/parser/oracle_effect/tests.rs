@@ -26237,8 +26237,9 @@ fn become_choice_trailing_window_reaches_apply_half() {
         );
     }
 
-    // CR 611.2a: the LEADING position reaches the apply half through the same
-    // context channel.
+    // CR 611.2a: the LEADING position reaches the apply half too (both the
+    // context channel and `with_clause_chain_duration` carry it) — a regression
+    // pin, not a revert discriminator.
     let def = parse_effect_chain(
         "Until end of turn, target creature becomes the color of your choice and gains hexproof \
          from that color.",
