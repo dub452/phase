@@ -3,8 +3,8 @@
 Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
 
 - **Canonical root causes:** 29
-- **Distinct cards implicated:** 4564
-- **Total card appearances across root causes:** 4597 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Distinct cards implicated:** 4556
+- **Total card appearances across root causes:** 4589 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
 
 > Counting method: both figures count the per-root-cause card bullets only — the
 > three metadata bullets above are excluded — and are the source of truth.
@@ -38,14 +38,14 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | 21 | Token entry flags / keyword / attachment clause dropped | 52 | oracle parser token-description handling — preserve attacking/tapped flags, keyword grants, attach target |
 | 23 | Effect modeled with structurally wrong variant / ability class | 50 | add-engine-effect: select the correct Effect/ability variant for the clause class |
 | 24 | Variable X / where-X count unbound (sentinel or unresolved Variable) | 37 | oracle_cost.rs / oracle_quantity.rs — allow QuantityExpr in count fields and bind trailing 'where X is' clauses |
-| 25 | Wrong / dropped effect duration | 28 | oracle_nom/duration.rs — add until-event / two-turn / permanent duration variants |
+| 25 | Wrong / dropped effect duration | 20 | oracle_nom/duration.rs — add until-event / two-turn / permanent duration variants |
 | 26 | Delayed / future-phase trigger flattened to immediate effect | 20 | add-trigger: wrap future-phase effects in CreateDelayedTrigger |
 | 27 | Cross-target group / shared-quality constraint dropped | 12 | oracle_target.rs multi_target — add SameController/SameZone/DistinctNames/Parity constraints |
 | 28 | Trigger/activation timing or ordinal restriction dropped | 12 | oracle_casting.rs scan_timing_restrictions + trigger constraint parsing |
 | 30 | Token/named-card name corrupted by normalization or overrun | 7 | oracle_util.rs SELF_REF normalization + Named-filter parsing — guard literal 'named X' spans |
 | 31 | Other / uncategorized misparse | 4 | manual triage |
 
-> The top **5** root causes cover 2427/4597 ≈ 53% of all misparse appearances; the top 10 cover 3418/4597 ≈ 74%. Fix these first.
+> The top **5** root causes cover 2427/4589 ≈ 53% of all misparse appearances; the top 10 cover 3418/4589 ≈ 74%. Fix these first.
 
 ## Full card lists per root cause
 
@@ -4839,7 +4839,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 25. Wrong / dropped effect duration  (28 cards)
+### 25. Wrong / dropped effect duration  (20 cards)
 
 **Signature.** Effect duration is wrong (UntilEndOfTurn where permanent/until-event/two-turn needed, or a spurious expiry added), or a 'until <state change>' delayed-return is dropped.
 
@@ -4859,13 +4859,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Fraying Sanity
 - Glorious End
 - Golden Guardian
-- Jinx
-- Mistform Shrieker
-- Mistform Skyreaver
-- Mistform Stalker
-- Mistform Wakecaster
-- Mistform Wall
-- Mistform Warchief
 - Monoist Gravliner
 - Mythos of Vadrok
 - Nezumi Ronin
@@ -4873,7 +4866,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Palace Jailer
 - Peace Talks
 - Plant a Sapling
-- Trickery Charm
 - War of the Last Alliance
 
 </details>
@@ -5046,6 +5038,12 @@ CR 607.2d linkage seam (`parser/oracle_nom/filter.rs::classify_chosen_color_gran
 `None => modification.clone()` fallback gains its first discriminating test at
 the same moment, and **Chromatic Armor** becomes the first pool permanent able
 to hold two persisting colour answers.
+
+**F1-subtype — `persist: false` creature-type / basic-land-type choosers write nothing.**
+CLOSED. The "becomes the creature type / basic land type of your choice" class
+(Mistform family, Jinx, Trickery Charm, and the rest) now latches this
+resolution's answer when the effect is applied, and distinguishes set from
+retain semantics; see "Named follow-ups — the chosen-subtype class" below.
 
 **F6 — wrap the printed colour choice at the CARRYING clause's own node.**
 `inject_printed_color_choice_filter`
