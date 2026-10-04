@@ -3,8 +3,8 @@
 Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
 
 - **Canonical root causes:** 29
-- **Distinct cards implicated:** 4565
-- **Total card appearances across root causes:** 4598 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Distinct cards implicated:** 4564
+- **Total card appearances across root causes:** 4597 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
 
 > Counting method: both figures count the per-root-cause card bullets only — the
 > three metadata bullets above are excluded — and are the source of truth.
@@ -32,7 +32,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | 15 | Multi-target / 'up to N' optionality or count dropped | 83 | oracle_target.rs strip_optional_target_prefix — preserve MultiTargetSpec and optional_targeting |
 | 16 | Keyword payload / multiplicity / mis-tokenization | 83 | game/keywords.rs + oracle keyword parsing — use typed discriminants and guard ability-word labels |
 | 17 | Copy 'except' / additional-modification clause dropped | 81 | oracle parser copy handling — populate BecomeCopy/CopyTokenOf additional_modifications from the except-list (CR 707.2) |
-| 18 | Subtype / type-change modification malformed or dropped | 79 | oracle_util.rs SUBTYPES + parse_enchanted_is_type — register subtypes and emit full type-change set |
+| 18 | Subtype / type-change modification malformed or dropped | 78 | oracle_util.rs SUBTYPES + parse_enchanted_is_type — register subtypes and emit full type-change set |
 | 20 | Damage subject/recipient set incomplete | 70 | Effect::DealDamage handling — capture all damage subjects/recipients per CR 120 |
 | 19 | Perpetual (Alchemy) duration mis-mapped to UntilEndOfTurn | 55 | oracle_nom/duration.rs — add Perpetual duration combinator branch |
 | 21 | Token entry flags / keyword / attachment clause dropped | 52 | oracle parser token-description handling — preserve attacking/tapped flags, keyword grants, attach target |
@@ -45,7 +45,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | 30 | Token/named-card name corrupted by normalization or overrun | 7 | oracle_util.rs SELF_REF normalization + Named-filter parsing — guard literal 'named X' spans |
 | 31 | Other / uncategorized misparse | 4 | manual triage |
 
-> The top **5** root causes cover 2427/4598 ≈ 53% of all misparse appearances; the top 10 cover 3418/4598 ≈ 74%. Fix these first.
+> The top **5** root causes cover 2427/4597 ≈ 53% of all misparse appearances; the top 10 cover 3418/4597 ≈ 74%. Fix these first.
 
 ## Full card lists per root cause
 
@@ -4431,7 +4431,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 18. Subtype / type-change modification malformed or dropped  (79 cards)
+### 18. Subtype / type-change modification malformed or dropped  (78 cards)
 
 **Signature.** A subtype is missing from SUBTYPES (silently discarded), singularized wrongly, a state/type word is mis-encoded as a Subtype, or a 'becomes/is a [color][type]' modification drops the color/subtype/P-T piece.
 
@@ -4501,7 +4501,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - The Wasp, Winsome Avenger
 - Then, Dreadmaws Ate Everyone
 - There and Back Again
-- Tideshaper Mystic
 - Timeless Dragon
 - Timeless Witness
 - Transgress the Mind
@@ -5220,3 +5219,50 @@ Both activated abilities export `Effect::PreventDamage` with NO
 `damage_source_filter`, so they prevent all damage from every source — with no
 `Effect::Unimplemented` and no parse warning. Same seam as root cause 11
 (replacement / prevention effect mis-modeled), not the object-filter seam.
+
+## Named follow-ups — the chosen-subtype class
+
+Filed by the Mistform Stalker / chosen-subtype work. The headline defect is
+CLOSED: "becomes the creature type / basic land type of your choice" (the
+Mistform family, Jinx, Trickery Charm, Reef Shaman, Unstable Frontier,
+Tideshaper Mystic, Mistform Sliver and Navigator's Compass "in addition to its
+other types") lowers a `persist: false` chooser whose answer lives only in
+`state.last_named_choice`, while the layer applier read the SOURCE's
+`chosen_attributes` — so the type change applied nothing. Resolution-created
+chosen-subtype effects now latch this resolution's answer once, when the effect
+is applied (CR 608.2d + CR 608.2h), in
+`crates/engine/src/game/effects/effect.rs::snapshot_transient_modifications`
+via `crates/engine/src/game/effects/choose.rs::resolution_chosen_subtype` /
+`resolution_chosen_basic_land_type`; printed statics stay live (CR 611.3a).
+Route A (`parser/oracle_effect/subject.rs::try_parse_become_choice`) now
+distinguishes set from retain: without the "in addition to its other types"
+marker the chosen creature type replaces the creature types (CR 205.1a) and the
+chosen basic land type sets the land's type (CR 305.7); with it the chosen
+subtype is added (CR 205.1b, CR 305.7). Regressed by
+`crates/engine/tests/integration/become_chosen_subtype.rs`.
+
+**S1 — Route B "becomes that type" is still wrong on two axes.** The
+`that type` branch of `build_become_clause`
+(`crates/engine/src/parser/oracle_effect/subject.rs`):
+(i) emits the additive `AddChosenSubtype` although "becomes that type" SETS the
+type (CR 205.1a) — Imagecrafter, Unnatural Selection, Standardize, Mistform
+Mutant, and Mistform Wakecaster's second ability keep their old creature types;
+(ii) hard-codes `ChosenSubtypeKind::CreatureType` even after a basic-land-type
+chooser, so Terraformer and Elsewhere Flask ("Choose a basic land type. Each
+land you control becomes that type") silently read nothing. Filed rather than
+fixed; out of scope for the chosen-subtype work.
+
+**S2 — `resolve_random_in_chain` does not clear `last_named_choice`.** The
+random `Effect::Choose` path (`game/effects/choose.rs::resolve_random_in_chain`)
+writes the slot through `bind_named_choice` but, unlike the interactive
+`NamedChoice` answer arm, never clears it. A future resolution-created
+chosen-subtype effect with no `Choose` in its own chain could therefore latch a
+stale random answer. Zero affected producers today: every resolution-created
+chosen-subtype `GenericEffect` has its own `Choose` parent, which overwrites the
+slot before the effect is applied.
+
+**S3 — the colour twin remains under F1.** The `persist: false` "becomes the
+color[s] of your choice" class (Wild Mongrel, Kavu Chameleon, Shyft, Greater
+Morphling, Mondo Gecko) is not touched by this latch — its `AddChosenColor`
+still reads the source's chosen colour at layer time and is tracked by F1 in
+the chosen-colour follow-ups above.
