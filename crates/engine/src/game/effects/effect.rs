@@ -1392,10 +1392,10 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        ContinuousModification, ControllerRef, Duration, QuantityExpr, QuantityRef,
-        StaticDefinition, TargetFilter, TypedFilter,
+        BasicLandType, ChoiceValue, ChosenSubtypeKind, ContinuousModification, ControllerRef,
+        Duration, QuantityExpr, QuantityRef, StaticDefinition, TargetFilter, TypedFilter,
     };
-    use crate::types::card_type::CoreType;
+    use crate::types::card_type::{CoreType, SubtypeSet};
     use crate::types::events::GameEvent;
     use crate::types::game_state::{StackEntry, StackEntryKind};
     use crate::types::identifiers::{CardId, ObjectIncarnationRef, TrackedSetId};
@@ -1454,9 +1454,6 @@ mod tests {
     /// with no answer anywhere the payload is left untouched (CR 609.3).
     #[test]
     fn snapshot_latches_this_resolutions_chosen_subtype() {
-        use crate::types::ability::{BasicLandType, ChoiceValue, ChosenSubtypeKind};
-        use crate::types::card_type::SubtypeSet;
-
         let mut state = GameState::new_two_player(42);
         let source = create_object(
             &mut state,
