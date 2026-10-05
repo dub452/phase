@@ -33243,3 +33243,121 @@ fn lich_as_enters_life_loss_parses_as_moved_self_replacement() {
         .iter()
         .any(|def| matches!(def.mode, StaticMode::CantLoseTheGame)));
 }
+
+// ── Player-quantified zone-size conditions (CR 400.1 + CR 102.1) ──────────
+
+const SHELLDOCK_ISLE_ORACLE: &str = "Hideaway 4 (When this land enters, look at the top four cards of your library, exile one face down, then put the rest on the bottom in a random order.)\nThis land enters tapped.\n{T}: Add {U}.\n{U}, {T}: You may play the exiled card without paying its mana cost if a library has twenty or fewer cards in it.";
+const HOWLTOOTH_HOLLOW_ORACLE: &str = "Hideaway 4 (When this land enters, look at the top four cards of your library, exile one face down, then put the rest on the bottom in a random order.)\nThis land enters tapped.\n{T}: Add {B}.\n{B}, {T}: You may play the exiled card without paying its mana cost if each player has no cards in hand.";
+const ISLEBACK_SPAWN_ORACLE: &str = "Shroud (This creature can't be the target of spells or abilities.)\nThis creature gets +4/+8 as long as a library has twenty or fewer cards in it.";
+
+/// `PlayerCount{PlayerAttribute{All, attr, inner, inner_value}}` as a
+/// `QuantityExpr` — the lifted per-candidate census.
+fn player_attribute_census(attr: QuantityRef, inner: Comparator, inner_value: i32) -> QuantityExpr {
+    QuantityExpr::Ref {
+        qty: QuantityRef::PlayerCount {
+            filter: PlayerFilter::PlayerAttribute {
+                relation: PlayerRelation::All,
+                attr: Box::new(attr),
+                comparator: inner,
+                value: Box::new(QuantityExpr::Fixed { value: inner_value }),
+            },
+        },
+    }
+}
+
+fn scoped_library_size() -> QuantityRef {
+    QuantityRef::ZoneCardCount {
+        zone: crate::types::ability::ZoneRef::Library,
+        card_types: vec![],
+        filter: None,
+        scope: CountScope::ScopedPlayer,
+    }
+}
+
+fn hideaway_play_ability(parsed: &ParsedAbilities) -> &AbilityDefinition {
+    parsed
+        .abilities
+        .iter()
+        .find(|def| {
+            matches!(
+                *def.effect,
+                Effect::CastFromZone {
+                    target: TargetFilter::ExiledBySource,
+                    without_paying_mana_cost: true,
+                    mode: CardPlayMode::Play,
+                    ..
+                }
+            )
+        })
+        .expect("hideaway play ability must parse to CastFromZone{ExiledBySource, Play}")
+}
+
+/// CR 608.2c + CR 702.75a: Shelldock Isle's play ability carries the typed
+/// existential library-size gate, and Howltooth Hollow's carries the
+/// universal empty-hand gate — neither condition is dropped.
+#[test]
+fn shelldock_isle_play_ability_carries_library_size_condition() {
+    let parsed = parse_oracle_text(
+        SHELLDOCK_ISLE_ORACLE,
+        "Shelldock Isle",
+        &[],
+        &["Land".into()],
+        &[],
+    );
+    assert_eq!(
+        hideaway_play_ability(&parsed).condition,
+        Some(AbilityCondition::QuantityCheck {
+            lhs: player_attribute_census(scoped_library_size(), Comparator::LE, 20),
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        })
+    );
+
+    let parsed = parse_oracle_text(
+        HOWLTOOTH_HOLLOW_ORACLE,
+        "Howltooth Hollow",
+        &[],
+        &["Land".into()],
+        &[],
+    );
+    assert_eq!(
+        hideaway_play_ability(&parsed).condition,
+        Some(AbilityCondition::QuantityCheck {
+            lhs: player_attribute_census(
+                QuantityRef::HandSize {
+                    player: PlayerScope::ScopedPlayer,
+                },
+                Comparator::NE,
+                0,
+            ),
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 0 },
+        })
+    );
+}
+
+/// CR 611.3a: Isleback Spawn's static gate is the typed existential
+/// library-size condition, not `Unrecognized`.
+#[test]
+fn isleback_spawn_static_condition_is_typed() {
+    let parsed = parse_oracle_text(
+        ISLEBACK_SPAWN_ORACLE,
+        "Isleback Spawn",
+        &["Shroud".into()],
+        &["Creature".into()],
+        &["Kraken".into()],
+    );
+    let static_def = parsed
+        .statics
+        .iter()
+        .find(|def| def.condition.is_some())
+        .expect("Isleback Spawn must have a conditional static");
+    assert_eq!(
+        static_def.condition,
+        Some(StaticCondition::QuantityComparison {
+            lhs: player_attribute_census(scoped_library_size(), Comparator::LE, 20),
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        })
+    );
+}

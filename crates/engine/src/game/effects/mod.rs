@@ -13,16 +13,16 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityUseTally, CardPlayMode,
     CardTypeSetSource, CastFromZoneDriver, ChosenAttribute, CommanderOwnership,
     ContinuousModification, ControllerRef, CopyRetargetPermission, CostPaidObjectSnapshot,
-    CounterKindDomain, DetachedRemainder, Duration, EachDamageRecipient, Effect, EffectError,
-    EffectKind, EffectOutcomeSignal, EffectResolutionResult, EffectScope, ExtraPhaseRecipient,
-    FilterProp, ForEachCategoryAction, ForwardedResultContext, ManaProduction,
+    CountScope, CounterKindDomain, DetachedRemainder, Duration, EachDamageRecipient, Effect,
+    EffectError, EffectKind, EffectOutcomeSignal, EffectResolutionResult, EffectScope,
+    ExtraPhaseRecipient, FilterProp, ForEachCategoryAction, ForwardedResultContext, ManaProduction,
     MassLibraryShuffleMode, NameStickerSet, ObjectSelectionCardinality, OpponentMayScope,
     PlayerFilter, PlayerRelation, PlayerScope, PossessionAxis, PtValue, QuantityExpr, QuantityRef,
     ReciprocalZoneChoiceRole, RepeatContinuation, ResolvedAbility, RevealUntilDisposition,
     SacrificeCost, SacrificeRequirement, SharedQuality, SharedQualityRelation, SiblingCondition,
     StaticDefinition, SubAbilityLink, TapStateChange, TargetChoiceTiming,
     TargetDamageSourceBinding, TargetFilter, TargetRef, ThisWayCause, TypedFilter,
-    ZoneChoiceCandidateSource, ZoneChoiceChooser,
+    ZoneChoiceCandidateSource, ZoneChoiceChooser, ZoneRef,
 };
 #[cfg(test)]
 use crate::types::ability::{AttackSubject, CombatHistoryScope};
@@ -693,7 +693,7 @@ pub(crate) fn player_control_count_compares(
     )
 }
 
-/// CR 402.1 / 119.1 / 119.3 / 122.1f / 404.1: Read scalar `attr` for one
+/// CR 402.1 / 119.1 / 119.3 / 122.1f / 404.1 / 400.1 / 401.1: Read scalar `attr` for one
 /// candidate player DIRECTLY off the candidate `Player` (NOT via the
 /// controller-scoped `resolve_quantity`), so `PlayerFilter::PlayerAttribute`
 /// reads each player's own hand size / life total / life lost or gained /
@@ -731,6 +731,22 @@ pub(crate) fn candidate_player_scalar(p: &Player, attr: &QuantityRef) -> Option<
         QuantityRef::PlayerChosenNumber { .. } => p
             .chosen_number()
             .map(crate::game::arithmetic::u32_to_i32_saturating),
+        // CR 400.1: each player has their own library, hand, and graveyard, so an
+        // unfiltered per-candidate (`ScopedPlayer`) zone count reads the candidate's
+        // own zone. Exile is shared (CR 400.1), and a typed/filtered count needs
+        // object state — both fail the candidate closed.
+        QuantityRef::ZoneCardCount {
+            zone,
+            card_types,
+            filter: None,
+            scope: CountScope::ScopedPlayer,
+        } if card_types.is_empty() => match zone {
+            // CR 401.1: cards in the candidate's library.
+            ZoneRef::Library => Some(usize_to_i32_saturating(p.library.len())),
+            ZoneRef::Graveyard => Some(usize_to_i32_saturating(p.graveyard.len())),
+            ZoneRef::Hand => Some(usize_to_i32_saturating(p.hand.len())),
+            ZoneRef::Exile => None,
+        },
         _ => None,
     }
 }
@@ -39376,6 +39392,9 @@ mod tests {
             p.hand.push_back(ObjectId(3));
             p.graveyard.push_back(ObjectId(4));
             p.graveyard.push_back(ObjectId(5));
+            for id in 10..15 {
+                p.library.push_back(ObjectId(id));
+            }
             p.player_counter(&PlayerCounterKind::Experience); // no-op read
             p.add_player_counters(&PlayerCounterKind::Experience, 6);
         }
@@ -39456,6 +39475,69 @@ mod tests {
                 }
             ),
             Some(6)
+        );
+        // CR 400.1 + CR 401.1: an unfiltered per-candidate (`ScopedPlayer`)
+        // zone count reads the candidate's own library / graveyard / hand.
+        let scoped_zone_count = |zone: ZoneRef| QuantityRef::ZoneCardCount {
+            zone,
+            card_types: vec![],
+            filter: None,
+            scope: CountScope::ScopedPlayer,
+        };
+        assert_eq!(
+            candidate_player_scalar(p, &scoped_zone_count(ZoneRef::Library)),
+            Some(5)
+        );
+        assert_eq!(
+            candidate_player_scalar(p, &scoped_zone_count(ZoneRef::Graveyard)),
+            Some(2)
+        );
+        assert_eq!(
+            candidate_player_scalar(p, &scoped_zone_count(ZoneRef::Hand)),
+            Some(3)
+        );
+        // CR 400.1: exile is shared, so there is no per-candidate exile scalar.
+        assert_eq!(
+            candidate_player_scalar(p, &scoped_zone_count(ZoneRef::Exile)),
+            None
+        );
+        // A typed or filtered count needs object state — fails closed.
+        assert_eq!(
+            candidate_player_scalar(
+                p,
+                &QuantityRef::ZoneCardCount {
+                    zone: ZoneRef::Library,
+                    card_types: vec![crate::types::ability::TypeFilter::Creature],
+                    filter: None,
+                    scope: CountScope::ScopedPlayer,
+                }
+            ),
+            None
+        );
+        assert_eq!(
+            candidate_player_scalar(
+                p,
+                &QuantityRef::ZoneCardCount {
+                    zone: ZoneRef::Library,
+                    card_types: vec![],
+                    filter: Some(TargetFilter::Any),
+                    scope: CountScope::ScopedPlayer,
+                }
+            ),
+            None
+        );
+        // A non-candidate scope must not leak an inert per-candidate read.
+        assert_eq!(
+            candidate_player_scalar(
+                p,
+                &QuantityRef::ZoneCardCount {
+                    zone: ZoneRef::Library,
+                    card_types: vec![],
+                    filter: None,
+                    scope: CountScope::Controller,
+                }
+            ),
+            None
         );
         // Non-scalar QuantityRef → None (parser invariant; fails the predicate
         // closed rather than reading a controller-scoped quantity off a

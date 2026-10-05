@@ -16972,6 +16972,102 @@ mod tests {
         );
     }
 
+    /// CR 400.1 + CR 401.1 + CR 800.4a: the existential library census behind
+    /// "a library has twenty or fewer cards in it" (Shelldock Isle / Isleback
+    /// Spawn) reads each candidate's OWN library, and an eliminated player's
+    /// library is out of the population.
+    #[test]
+    fn resolve_player_count_library_size_le_is_per_candidate() {
+        use crate::types::ability::{Comparator, CountScope, PlayerRelation, ZoneRef};
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::commander(), 3, 42);
+        let set_library = |state: &mut GameState, pid: usize, n: u64| {
+            state.players[pid].library.clear();
+            for i in 0..n {
+                state.players[pid]
+                    .library
+                    .push_back(ObjectId(2000 + pid as u64 * 100 + i));
+            }
+        };
+        set_library(&mut state, 0, 30);
+        set_library(&mut state, 1, 20);
+        set_library(&mut state, 2, 21);
+
+        let census = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::PlayerAttribute {
+                    relation: PlayerRelation::All,
+                    attr: Box::new(QuantityRef::ZoneCardCount {
+                        zone: ZoneRef::Library,
+                        card_types: vec![],
+                        filter: None,
+                        scope: CountScope::ScopedPlayer,
+                    }),
+                    comparator: Comparator::LE,
+                    value: Box::new(QuantityExpr::Fixed { value: 20 }),
+                },
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &census, PlayerId(0), ObjectId(1)),
+            1,
+            "only P1's 20-card library satisfies ≤ 20"
+        );
+
+        set_library(&mut state, 1, 21);
+        assert_eq!(
+            resolve_quantity(&state, &census, PlayerId(0), ObjectId(1)),
+            0,
+            "no library is at or below 20"
+        );
+
+        // CR 800.4a: an eliminated player's tiny library must not satisfy.
+        set_library(&mut state, 2, 5);
+        state.players[2].is_eliminated = true;
+        assert_eq!(
+            resolve_quantity(&state, &census, PlayerId(0), ObjectId(1)),
+            0,
+            "an eliminated player's library is outside the population"
+        );
+    }
+
+    /// CR 102.1 + CR 402.1: the universal "each player has no cards in hand"
+    /// (Howltooth Hollow) is encoded as "no player holds a card" —
+    /// `PlayerAttribute{All, HandSize, NE, 0}` counted to zero.
+    #[test]
+    fn resolve_player_count_universal_hand_negated_predicate() {
+        use crate::types::ability::{Comparator, PlayerRelation, PlayerScope};
+
+        let mut state = GameState::new_two_player(42);
+        let failing = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::PlayerAttribute {
+                    relation: PlayerRelation::All,
+                    attr: Box::new(QuantityRef::HandSize {
+                        player: PlayerScope::ScopedPlayer,
+                    }),
+                    comparator: Comparator::NE,
+                    value: Box::new(QuantityExpr::Fixed { value: 0 }),
+                },
+            },
+        };
+        state.players[0].hand.clear();
+        state.players[1].hand.clear();
+        assert_eq!(
+            resolve_quantity(&state, &failing, PlayerId(0), ObjectId(1)),
+            0,
+            "every hand empty → no player fails the predicate"
+        );
+
+        state.players[1].hand.push_back(ObjectId(3000));
+        assert_eq!(
+            resolve_quantity(&state, &failing, PlayerId(0), ObjectId(1)),
+            1,
+            "exactly one player holds a card"
+        );
+    }
+
     #[test]
     fn resolve_quantity_zone_card_count_matches_subtype_cards() {
         let mut state = GameState::new_two_player(42);

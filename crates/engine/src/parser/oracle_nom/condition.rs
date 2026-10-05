@@ -244,6 +244,56 @@ impl ConditionConnective {
     }
 }
 
+/// CR 102.1: the player population a player-subject condition quantifies over —
+/// "a player has P" (∃) vs "each player has P" (∀). Parser-internal; not a rules
+/// concept of its own.
+#[derive(Clone, Copy)]
+enum PlayerQuantifier {
+    Existential,
+    Universal,
+}
+
+impl PlayerQuantifier {
+    /// Lift a per-player predicate (`QuantityComparison` whose lhs is a
+    /// per-candidate scalar) into a `PlayerCount` over the `relation`
+    /// population. The single lifting authority for player-quantified
+    /// conditions.
+    ///
+    /// - `Existential`: ∃p P(p) ⇔ count(P) ≥ 1.
+    /// - `Universal`: ∀p P(p) ⇔ no player fails P ⇔ count(¬P) = 0, with ¬P
+    ///   expressed through `Comparator::negate`.
+    ///
+    /// Returns `None` when the predicate is not a single scalar comparison (e.g.
+    /// the `Or` produced by "exactly zero or seven cards in hand"), so callers
+    /// fail the parse closed instead of emitting a wrong shape.
+    fn lift(self, relation: PlayerRelation, predicate: StaticCondition) -> Option<StaticCondition> {
+        let StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref { qty: attr },
+            comparator,
+            rhs: value,
+        } = predicate
+        else {
+            return None;
+        };
+        let (comparator, outer_comparator, outer_n) = match self {
+            Self::Existential => (comparator, Comparator::GE, 1),
+            Self::Universal => (comparator.negate(), Comparator::EQ, 0),
+        };
+        Some(make_quantity_comparison(
+            QuantityRef::PlayerCount {
+                filter: PlayerFilter::PlayerAttribute {
+                    relation,
+                    attr: Box::new(attr),
+                    comparator,
+                    value: Box::new(value),
+                },
+            },
+            outer_comparator,
+            outer_n,
+        ))
+    }
+}
+
 fn parse_condition_connector(input: &str) -> OracleResult<'_, ConditionConnective> {
     alt((
         value(ConditionConnective::And, tag(" and ")),
@@ -377,6 +427,11 @@ fn parse_state_presence_conditions(input: &str) -> OracleResult<'_, StaticCondit
         // <hand-size predicate>" OR "a player has more <property> than each
         // other player" (the unique-leader tail).
         parse_a_player_has_property_condition,
+        // CR 102.1 + CR 402.1 + CR 608.2c: universal "each player/opponent has
+        // <hand-size predicate>" (Howltooth Hollow). A non-hand tail (e.g.
+        // "each player has 10 or less life") fails this arm and falls through
+        // to `parse_each_player_life_threshold`.
+        parse_each_player_has_property_condition,
         parse_you_have_conditions,
         parse_parent_target_controller_more_life_than_you,
         parse_that_player_has_conditions,
@@ -467,7 +522,7 @@ fn parse_remaining_state_presence_conditions(input: &str) -> OracleResult<'_, St
         parse_no_opponent_comparison_conditions,
         parse_triggering_player_has_unattacked_opponent,
         parse_opponent_comparison_conditions,
-        parse_a_graveyard_size_condition,
+        parse_a_zone_size_condition,
         parse_life_conditions,
         parse_each_player_life_threshold,
         parse_offered_card_mana_value_comparison,
@@ -3428,28 +3483,54 @@ fn parse_hand_size_threshold_existential(input: &str) -> OracleResult<'_, Static
     let Some((rest, predicate)) = parse_hand_size_predicate(input, PlayerScope::Controller) else {
         return Err(oracle_err(input));
     };
-    let StaticCondition::QuantityComparison {
-        lhs: QuantityExpr::Ref { qty: attr },
-        comparator,
-        rhs: value,
-    } = predicate
-    else {
+    let lifted = PlayerQuantifier::Existential
+        .lift(PlayerRelation::All, predicate)
+        .ok_or_else(|| oracle_err(input))?;
+    Ok((rest, lifted))
+}
+
+/// CR 102.1: the universal player-subject axis — "each player has " /
+/// "each opponent has ". Shared by the universal hand-size arm
+/// (`parse_each_player_has_property_condition`) and the universal life arm
+/// (`parse_each_player_life_threshold`). Never yields
+/// `PlayerRelation::Controller`.
+///
+/// Sibling: `parse_player_population` (`parser/oracle_quantity.rs`) maps the
+/// population word of a `PlayerAttribute` *count* filter ("players"/"opponents"
+/// → `PlayerRelation`); this combinator maps the population of a universally
+/// quantified *condition* subject to the same `PlayerRelation` axis.
+fn parse_each_player_subject(input: &str) -> OracleResult<'_, PlayerRelation> {
+    delimited(
+        tag("each "),
+        alt((
+            value(PlayerRelation::All, tag("player")),
+            value(PlayerRelation::Opponent, tag("opponent")),
+        )),
+        tag(" has "),
+    )
+    .parse(input)
+}
+
+/// CR 102.1 + CR 402.1 + CR 608.2c: universal "each player/opponent has
+/// <hand-size predicate>" (Howltooth Hollow: "if each player has no cards in
+/// hand"). Every player in the population must satisfy the predicate, encoded
+/// as "no player fails it" via `PlayerQuantifier::Universal`.
+///
+/// The per-candidate attr uses `PlayerScope::ScopedPlayer` — the semantically
+/// correct per-candidate scope, matching `parse_for_each_graveyard_size_clause`.
+/// The existential sibling (`parse_hand_size_threshold_existential`) keeps its
+/// pinned inert `Controller` scope only to avoid churning a shipped AST shape;
+/// the runtime reads `HandSize` off each candidate under `PlayerAttribute`
+/// either way.
+fn parse_each_player_has_property_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, relation) = parse_each_player_subject(input)?;
+    let Some((rest, predicate)) = parse_hand_size_predicate(rest, PlayerScope::ScopedPlayer) else {
         return Err(oracle_err(input));
     };
-    Ok((
-        rest,
-        make_quantity_ge(
-            QuantityRef::PlayerCount {
-                filter: PlayerFilter::PlayerAttribute {
-                    relation: PlayerRelation::All,
-                    attr: Box::new(attr),
-                    comparator,
-                    value: Box::new(value),
-                },
-            },
-            1,
-        ),
-    ))
+    let lifted = PlayerQuantifier::Universal
+        .lift(relation, predicate)
+        .ok_or_else(|| oracle_err(input))?;
+    Ok((rest, lifted))
 }
 
 /// CR 603.4 (the intervening-if consumer), CR 102.1 (the player population),
@@ -3962,6 +4043,32 @@ fn parse_you_have_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
                 },
                 4,
             ),
+        ));
+    }
+
+    // CR 102.1: "you have the most <property> or are tied for most <property>"
+    // (Preacher of the Schism's attack gate) → your value ≥ the highest value
+    // among ALL players (you included, so a tie with the leader passes).
+    if let Ok((rest, property)) =
+        preceded(tag("the "), nom_quantity::parse_most_or_tied_for_most).parse(rest)
+    {
+        return Ok((
+            rest,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: nom_quantity::player_property_quantity(property, PlayerScope::Controller),
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Ref {
+                    qty: nom_quantity::player_property_quantity(
+                        property,
+                        PlayerScope::AllPlayers {
+                            aggregate: AggregateFunction::Max,
+                            exclude: None,
+                        },
+                    ),
+                },
+            },
         ));
     }
 
@@ -5476,32 +5583,23 @@ fn parse_all_permanents_are_color(input: &str) -> OracleResult<'_, StaticConditi
 /// satisfies `life >= N` exactly when the MINIMUM is `>= N`, so the aggregate is
 /// the dual of the existential one (`existential_aggregate`).
 fn parse_each_player_life_threshold(input: &str) -> OracleResult<'_, StaticCondition> {
-    type ScopeOf = fn(AggregateFunction) -> PlayerScope;
-    let all_players: ScopeOf = |aggregate| PlayerScope::AllPlayers {
-        aggregate,
-        exclude: None,
-    };
-    let opponents: ScopeOf = |aggregate| PlayerScope::Opponent { aggregate };
-    let (rest, scope_of) = alt((
-        value(
-            all_players,
-            tag::<_, _, OracleError<'_>>("each player has "),
-        ),
-        value(opponents, tag("each opponent has ")),
-    ))
-    .parse(input)?;
+    let (rest, relation) = parse_each_player_subject(input)?;
     let (rest, n) = parse_number(rest)?;
     let (rest, comparator) = parse_life_threshold_suffix(rest)?;
     let aggregate = universal_aggregate(comparator);
+    let player = match relation {
+        PlayerRelation::All => PlayerScope::AllPlayers {
+            aggregate,
+            exclude: None,
+        },
+        PlayerRelation::Opponent => PlayerScope::Opponent { aggregate },
+        // Unreachable: `parse_each_player_subject` never yields the controller
+        // relation.
+        PlayerRelation::Controller => return Err(oracle_err(input)),
+    };
     Ok((
         rest,
-        make_quantity_comparison(
-            QuantityRef::LifeTotal {
-                player: scope_of(aggregate),
-            },
-            comparator,
-            n,
-        ),
+        make_quantity_comparison(QuantityRef::LifeTotal { player }, comparator, n),
     ))
 }
 
@@ -10467,26 +10565,84 @@ fn parse_opponent_comparison_conditions(input: &str) -> OracleResult<'_, StaticC
     )))
 }
 
+/// CR 400.1: "a <zone> has N or more|or fewer cards in it" — an existential
+/// over every player's own zone of that kind. Nested by the shared "a "
+/// prefix; each tail owns its zone noun.
+///
+/// The two tails deliberately use different encodings of the same
+/// existential: the graveyard tail keeps its shipped (and test-pinned)
+/// `GraveyardSize { AllPlayers { aggregate } }` shape, which is semantically
+/// equal (∃ ≥ N ⇔ max ≥ N; ∃ ≤ N ⇔ min ≤ N). The library tail is lifted per
+/// candidate through `PlayerQuantifier::Existential` because
+/// `ZoneCardCount`'s `CountScope` has no per-player aggregate axis.
+fn parse_a_zone_size_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+    preceded(
+        tag("a "),
+        alt((parse_graveyard_size_tail, parse_library_size_tail)),
+    )
+    .parse(input)
+}
+
+/// CR 400.1: the " or more cards in it" / " or fewer cards in it" threshold
+/// suffix shared by the per-zone size tails.
+fn parse_cards_in_it_comparator(input: &str) -> OracleResult<'_, Comparator> {
+    alt((
+        value(Comparator::GE, tag(" or more cards in it")),
+        value(Comparator::LE, tag(" or fewer cards in it")),
+    ))
+    .parse(input)
+}
+
 /// CR 404.1 + CR 608.2c: "a graveyard has N or more cards in it" checks
 /// whether any single player's graveyard reaches the threshold. Jace, the
 /// Perfected Mind evaluates this after milling; summing graveyards would
-/// incorrectly turn two smaller graveyards into a successful check.
-fn parse_a_graveyard_size_condition(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = tag::<_, _, OracleError<'_>>("a graveyard has ").parse(input)?;
+/// incorrectly turn two smaller graveyards into a successful check. The "or
+/// fewer" direction uses the dual aggregate (`existential_aggregate`: `Min`).
+fn parse_graveyard_size_tail(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("graveyard has ").parse(input)?;
     let (rest, n) = parse_number(rest)?;
-    let (rest, _) = tag::<_, _, OracleError<'_>>(" or more cards in it").parse(rest)?;
+    let (rest, comparator) = parse_cards_in_it_comparator(rest)?;
     Ok((
         rest,
-        make_quantity_ge(
+        make_quantity_comparison(
             QuantityRef::GraveyardSize {
                 player: PlayerScope::AllPlayers {
-                    aggregate: AggregateFunction::Max,
+                    aggregate: existential_aggregate(comparator),
                     exclude: None,
                 },
             },
+            comparator,
             n,
         ),
     ))
+}
+
+/// CR 400.1 + CR 401.1 + CR 608.2h: "a library has N or fewer|or more cards
+/// in it" — existential over every player's own library (Shelldock Isle
+/// ruling: "It doesn't matter which library"); lifted per candidate because
+/// `ZoneCardCount`'s `CountScope` has no per-player aggregate axis. Used by
+/// Shelldock Isle (resolution-time play gate, CR 608.2c + CR 702.75a) and
+/// Isleback Spawn (CR 611.3a).
+fn parse_library_size_tail(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("library has ").parse(input)?;
+    let (rest, n) = parse_number(rest)?;
+    let (rest, comparator) = parse_cards_in_it_comparator(rest)?;
+    let lifted = PlayerQuantifier::Existential
+        .lift(
+            PlayerRelation::All,
+            make_quantity_comparison(
+                QuantityRef::ZoneCardCount {
+                    zone: ZoneRef::Library,
+                    card_types: vec![],
+                    filter: None,
+                    scope: CountScope::ScopedPlayer,
+                },
+                comparator,
+                n,
+            ),
+        )
+        .ok_or_else(|| oracle_err(input))?;
+    Ok((rest, lifted))
 }
 
 fn parse_opponent_controls_at_least_more_than_you(
@@ -11826,6 +11982,202 @@ mod tests {
         );
         assert_eq!(comparator, Comparator::GE);
         assert_eq!(rhs, QuantityExpr::Fixed { value: 1 });
+    }
+
+    /// Builds the expected lifted `PlayerCount` comparison for the
+    /// player-quantified zone-size tests below.
+    fn player_count_condition(
+        relation: PlayerRelation,
+        attr: QuantityRef,
+        inner: Comparator,
+        inner_value: i32,
+        outer: Comparator,
+        outer_value: i32,
+    ) -> StaticCondition {
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::PlayerCount {
+                    filter: PlayerFilter::PlayerAttribute {
+                        relation,
+                        attr: Box::new(attr),
+                        comparator: inner,
+                        value: Box::new(QuantityExpr::Fixed { value: inner_value }),
+                    },
+                },
+            },
+            comparator: outer,
+            rhs: QuantityExpr::Fixed { value: outer_value },
+        }
+    }
+
+    fn scoped_library_count() -> QuantityRef {
+        QuantityRef::ZoneCardCount {
+            zone: ZoneRef::Library,
+            card_types: vec![],
+            filter: None,
+            scope: CountScope::ScopedPlayer,
+        }
+    }
+
+    /// CR 400.1 + CR 401.1: "a library has N or fewer cards in it" is an
+    /// existential over every player's own library (Shelldock Isle / Isleback
+    /// Spawn), lifted per candidate.
+    #[test]
+    fn a_library_has_n_or_fewer_cards_is_existential_per_candidate() {
+        let (rest, cond) = parse_inner_condition("a library has twenty or fewer cards in it")
+            .expect("library-size condition must parse");
+        assert_eq!(rest, "");
+        assert_eq!(
+            cond,
+            player_count_condition(
+                PlayerRelation::All,
+                scoped_library_count(),
+                Comparator::LE,
+                20,
+                Comparator::GE,
+                1,
+            )
+        );
+    }
+
+    /// The "or more" direction of the shared `parse_cards_in_it_comparator`
+    /// suffix on the library tail.
+    #[test]
+    fn a_library_has_n_or_more_cards_uses_ge() {
+        let (rest, cond) = parse_inner_condition("a library has ten or more cards in it")
+            .expect("library-size condition must parse");
+        assert_eq!(rest, "");
+        assert_eq!(
+            cond,
+            player_count_condition(
+                PlayerRelation::All,
+                scoped_library_count(),
+                Comparator::GE,
+                10,
+                Comparator::GE,
+                1,
+            )
+        );
+    }
+
+    /// CR 102.1 + CR 402.1: universal "each player has no cards in hand"
+    /// (Howltooth Hollow) — no player may FAIL the predicate, so the inner
+    /// comparator is negated (`EQ` → `NE`) and the count must be zero.
+    #[test]
+    fn each_player_has_no_cards_in_hand_is_universal() {
+        let (rest, cond) = parse_inner_condition("each player has no cards in hand")
+            .expect("universal hand-size condition must parse");
+        assert_eq!(rest, "");
+        assert_eq!(
+            cond,
+            player_count_condition(
+                PlayerRelation::All,
+                QuantityRef::HandSize {
+                    player: PlayerScope::ScopedPlayer,
+                },
+                Comparator::NE,
+                0,
+                Comparator::EQ,
+                0,
+            )
+        );
+    }
+
+    /// The opponent population of the universal subject axis, with a
+    /// non-equality predicate (`LE 1` negates to `GT 1`).
+    #[test]
+    fn each_opponent_has_one_or_fewer_cards_in_hand_is_universal_over_opponents() {
+        let (rest, cond) = parse_inner_condition("each opponent has one or fewer cards in hand")
+            .expect("universal opponent hand-size condition must parse");
+        assert_eq!(rest, "");
+        assert_eq!(
+            cond,
+            player_count_condition(
+                PlayerRelation::Opponent,
+                QuantityRef::HandSize {
+                    player: PlayerScope::ScopedPlayer,
+                },
+                Comparator::GT,
+                1,
+                Comparator::EQ,
+                0,
+            )
+        );
+    }
+
+    /// CR 404.1: the graveyard tail gains the "or fewer" direction through the
+    /// shared suffix; its existential aggregate is `Min`.
+    #[test]
+    fn a_graveyard_has_n_or_fewer_cards_uses_min_aggregate() {
+        let (rest, cond) = parse_inner_condition("a graveyard has five or fewer cards in it")
+            .expect("graveyard-size condition must parse");
+        assert_eq!(rest, "");
+        assert_eq!(
+            cond,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::GraveyardSize {
+                        player: PlayerScope::AllPlayers {
+                            aggregate: AggregateFunction::Min,
+                            exclude: None,
+                        },
+                    },
+                },
+                comparator: Comparator::LE,
+                rhs: QuantityExpr::Fixed { value: 5 },
+            }
+        );
+    }
+
+    /// The pre-existing "or more" graveyard shape is byte-identical after the
+    /// zone-size dispatcher refactor (`Max` aggregate).
+    #[test]
+    fn a_graveyard_has_n_or_more_cards_keeps_max_aggregate() {
+        let (rest, cond) = parse_inner_condition("a graveyard has twenty or more cards in it")
+            .expect("graveyard-size condition must parse");
+        assert_eq!(rest, "");
+        assert_eq!(
+            cond,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::GraveyardSize {
+                        player: PlayerScope::AllPlayers {
+                            aggregate: AggregateFunction::Max,
+                            exclude: None,
+                        },
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 20 },
+            }
+        );
+    }
+
+    /// Negative / sibling cases: a missing comparator suffix, a missing zone
+    /// suffix, and a disjunctive predicate (which `PlayerQuantifier::lift`
+    /// refuses) all fail closed; the universal life arm still wins for life.
+    #[test]
+    fn player_quantified_zone_size_negatives_fail_closed() {
+        assert!(parse_inner_condition("a library has twenty cards in it").is_err());
+        assert!(parse_inner_condition("each player has seven cards").is_err());
+        assert!(
+            parse_inner_condition("each player has exactly zero or seven cards in hand").is_err()
+        );
+        let (rest, cond) = parse_inner_condition("each player has 10 or less life")
+            .expect("universal life threshold must still parse");
+        assert_eq!(rest, "");
+        assert!(
+            matches!(
+                cond,
+                StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::LifeTotal { .. }
+                    },
+                    ..
+                }
+            ),
+            "life tail must keep its LifeTotal shape, got {cond:?}"
+        );
     }
 
     /// CR 603.4 + CR 608.2c: Avatar Aang's intervening-if "you've done all four
