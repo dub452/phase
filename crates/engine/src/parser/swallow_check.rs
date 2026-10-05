@@ -6035,10 +6035,11 @@ mod tests {
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, CardSelectionMode, ChooseFromZoneConstraint, Chooser,
-        ContinuousModification, CopyRetargetPermission, DamageModification, Effect, ManaProduction,
-        OutsideGameSourcePool, PlayerFilter, QuantityExpr, SpellStackToGraveyardReplacement,
-        StaticCondition, StaticDefinition, TargetFilter, TriggerCondition,
-        ZoneChoiceCandidateSource, ZoneOwner,
+        Comparator, ContinuousModification, CopyRetargetPermission, DamageModification, Effect,
+        FilterProp, ManaProduction, OutsideGameSourcePool, ParsedCondition, PlayerFilter,
+        QuantityExpr, QuantityRef, SpellStackToGraveyardReplacement, StaticCondition,
+        StaticDefinition, TargetFilter, TriggerCondition, TypedFilter, ZoneChoiceCandidateSource,
+        ZoneOwner,
     };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::TrackedSetId;
@@ -9589,10 +9590,6 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
     /// `PayCost` chain) and no Condition_If is reported.
     #[test]
     fn condition_if_accepts_pitfall_trap_alt_cost_gate() {
-        use crate::types::ability::{
-            Comparator, FilterProp, ParsedCondition, QuantityRef, TypedFilter,
-        };
-
         let parsed = parse_named(
             "If exactly one creature is attacking, you may pay {W} rather than pay \
 this spell's mana cost.\nDestroy target attacking creature without flying.",
