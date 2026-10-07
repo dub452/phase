@@ -62,13 +62,15 @@ use super::resolution::{
     ResolutionStack, ResolutionStackError, ResolutionStateWire,
 };
 use super::resolved_commands::{
-    ManaPaymentRecipient, ResolvedContinuousEffectCommand,
-    ResolvedContinuousEffectReplayInvariantError, ResolvedFrameTransition,
-    ResolvedFrameTransitionCommand, ResolvedFrameTransitionReplayInvariantError,
-    ResolvedInformationAudience, ResolvedInformationCommand, ResolvedInformationEdit,
-    ResolvedInformationLifetime, ResolvedInformationReplayInvariantError,
-    ResolvedManaInsertCommand, ResolvedManaReplayInvariantError, ResolvedManaSpendCommand,
-    ResolvedPlayerEdit, ResolvedPlayerEditCommand, ResolvedPlayerEditReplayInvariantError,
+    ManaPaymentRecipient, ResolvedContinuousEffectCommand, ResolvedContinuousEffectEdit,
+    ResolvedContinuousEffectEditReplayInvariantError, ResolvedContinuousEffectReplayInvariantError,
+    ResolvedContinuousEffectRetirementCommand, ResolvedContinuousEffectRetirementInvariantError,
+    ResolvedFrameTransition, ResolvedFrameTransitionCommand,
+    ResolvedFrameTransitionReplayInvariantError, ResolvedInformationAudience,
+    ResolvedInformationCommand, ResolvedInformationEdit, ResolvedInformationLifetime,
+    ResolvedInformationReplayInvariantError, ResolvedManaInsertCommand,
+    ResolvedManaReplayInvariantError, ResolvedManaSpendCommand, ResolvedPlayerEdit,
+    ResolvedPlayerEditCommand, ResolvedPlayerEditReplayInvariantError,
     ResolvedRngReplayInvariantError, ResolvedRulesCommand, ResolvedRulesJournal,
     RulesExecutionNodeRef,
 };
@@ -589,6 +591,9 @@ pub struct TriggerSourceContext {
     pub additional_cost_payments: Vec<AdditionalCostInstancePayment>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cast_cost_paid_object: Option<CostPaidObjectSnapshot>,
+    /// CR 201.5a: the granter stamped on the trigger definition this context was handed with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub granting_object: Option<ObjectIncarnationRef>,
 }
 
 impl std::fmt::Debug for TriggerSourceContext {
@@ -665,8 +670,11 @@ impl std::fmt::Debug for TriggerSourceContext {
                 &self.additional_cost_payment_count,
             )
             .field("additional_cost_payments", &self.additional_cost_payments)
-            .field("cast_cost_paid_object", &self.cast_cost_paid_object)
-            .finish()
+            .field("cast_cost_paid_object", &self.cast_cost_paid_object);
+        if self.granting_object.is_some() {
+            debug.field("granting_object", &self.granting_object);
+        }
+        debug.finish()
     }
 }
 
@@ -2677,6 +2685,9 @@ pub struct PendingExileFromTopUntil {
     pub linked_batch: Vec<ObjectIncarnationRef>,
     /// Cumulative property total completed before the pause.
     pub cumulative: i32,
+    /// `NextMatches` hits completed before the pause, in exile order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hits: Vec<ObjectId>,
 }
 
 impl PendingContinuation {
@@ -20105,7 +20116,8 @@ declare_game_state! {
     /// O(1) presence index over `StaticModeKind` discriminants — "does any functioning
     /// static of kind K exist on the board?" Rebuilt wholesale from `game_functioning_statics`
     /// as a byproduct of the layers pipeline (`layers::refresh_static_mode_presence`), so it is
-    /// exactly `.any(kind)` for every kind. Lets discriminant-only scan gates (e.g. the
+    /// the `.any(kind)` fold for every kind, plus `Goaded` for every def
+    /// `combat::static_designates_goad` admits. Lets discriminant-only scan gates (e.g. the
     /// hexproof scans in `static_abilities`) skip an O(battlefield) `.any()` when zero statics
     /// of that kind exist.
     ///
@@ -22833,14 +22845,16 @@ pub struct EndEffectPermission {
 
 /// Exact object bindings captured when a transient continuous effect begins.
 ///
-/// CR 400.7 + CR 611.2b: both fields name the particular objects the resolved
-/// effect may affect or whose state may sustain its duration.  They travel in
-/// the same journaled install command as the rest of the effect, rather than
-/// being attached after installation, so replay cannot observe a partial TCE.
+/// CR 400.7 + CR 611.2b: `affected_recipient` and `duration_subject` name the
+/// particular objects the resolved effect may affect or whose state may sustain
+/// its duration.  They travel in the same journaled install command as the rest
+/// of the effect, rather than being attached after installation, so replay
+/// cannot observe a partial TCE.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TransientContinuousEffectBindings {
     pub affected_recipient: Option<ObjectIncarnationRef>,
     pub duration_subject: Option<ObjectIncarnationRef>,
+    pub granting_object: Option<ObjectIncarnationRef>,
 }
 
 /// A runtime-generated continuous effect stored at state level.
@@ -22887,12 +22901,15 @@ pub struct TransientContinuousEffect {
     pub duration_event_source: Option<Box<TriggerSourceContext>>,
     /// CR 116.2c: see [`EndEffectPermission`]. `None` for every effect with no
     /// printed termination permission. Set inside the single construction
-    /// authority (`add_transient_continuous_effect_with_end_permission`), so it
+    /// authority (`add_transient_continuous_effect_inner`), so it
     /// rides inside the journaled `ResolvedContinuousEffectCommand` rather than
     /// being post-stamped. Backward-compatible across the WASM/multiplayer
     /// serialization boundary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub end_permission: Option<EndEffectPermission>,
+    /// CR 201.5a: the object that granted the ability that created this effect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub granting_object: Option<ObjectIncarnationRef>,
     /// Snapshot of the originating object's or dungeon's name, captured at construction.
     /// The originating spell/ability typically moves to a new zone (graveyard,
     /// stack→exile, etc.) with a new ObjectId per CR 400.7 after resolution,
@@ -28283,6 +28300,10 @@ impl GameState {
     /// SINGLE AUTHORITY for adding to `transient_continuous_effects`. Resolves
     /// the CR 613.7b timestamp and the effect id, installs the effect, and
     /// journals the settled CR 611.2a creation through its owning family.
+    ///
+    /// Returns `None` when a CR 611.2b "for as long as" duration never starts:
+    /// the effect does nothing, so nothing is allocated, installed or journaled
+    /// and callers must not emit the effect's side effects.
     pub fn add_transient_continuous_effect(
         &mut self,
         source_id: ObjectId,
@@ -28291,7 +28312,7 @@ impl GameState {
         affected: TargetFilter,
         modifications: Vec<ContinuousModification>,
         condition: Option<StaticCondition>,
-    ) -> u64 {
+    ) -> Option<u64> {
         self.add_transient_continuous_effect_inner(
             source_id,
             controller,
@@ -28316,7 +28337,7 @@ impl GameState {
         modifications: Vec<ContinuousModification>,
         condition: Option<StaticCondition>,
         bindings: TransientContinuousEffectBindings,
-    ) -> u64 {
+    ) -> Option<u64> {
         self.add_transient_continuous_effect_inner(
             source_id,
             controller,
@@ -28348,7 +28369,7 @@ impl GameState {
         modifications: Vec<ContinuousModification>,
         condition: Option<StaticCondition>,
         end_permission: EndEffectPermission,
-    ) -> u64 {
+    ) -> Option<u64> {
         self.add_transient_continuous_effect_inner(
             source_id,
             controller,
@@ -28362,7 +28383,89 @@ impl GameState {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn add_transient_continuous_effect_inner(
+    pub(crate) fn add_transient_continuous_effect_inner(
+        &mut self,
+        source_id: ObjectId,
+        controller: PlayerId,
+        duration: Duration,
+        affected: TargetFilter,
+        modifications: Vec<ContinuousModification>,
+        condition: Option<StaticCondition>,
+        end_permission: Option<EndEffectPermission>,
+        bindings: TransientContinuousEffectBindings,
+    ) -> Option<u64> {
+        self.transient_duration_begins(source_id, controller, &duration, &affected, bindings)
+            .then(|| {
+                self.install_started_transient_continuous_effect(
+                    source_id,
+                    controller,
+                    duration,
+                    affected,
+                    modifications,
+                    condition,
+                    end_permission,
+                    bindings,
+                )
+            })
+    }
+
+    /// CR 701.12a + CR 701.12b + CR 611.2b: register the effects one instruction
+    /// creates simultaneously, such as each player gaining control of the
+    /// other's permanent in an exchange. Every member's duration is tested on
+    /// the same settled board before any member is installed, and if any never
+    /// starts, none is installed. Returns whether the members were installed.
+    pub fn add_simultaneous_transient_continuous_effects(
+        &mut self,
+        source_id: ObjectId,
+        duration: Duration,
+        members: Vec<(PlayerId, TargetFilter, Vec<ContinuousModification>)>,
+    ) -> bool {
+        let bindings = TransientContinuousEffectBindings::default();
+        let all_begin = members.iter().all(|(controller, affected, _)| {
+            self.transient_duration_begins(source_id, *controller, &duration, affected, bindings)
+        });
+        if all_begin {
+            for (controller, affected, modifications) in members {
+                self.install_started_transient_continuous_effect(
+                    source_id,
+                    controller,
+                    duration.clone(),
+                    affected,
+                    modifications,
+                    None,
+                    None,
+                    bindings,
+                );
+            }
+        }
+        all_begin
+    }
+
+    /// CR 611.2b: "If the 'for as long as' duration never starts, the effect
+    /// does nothing." Tests a candidate on the settled board before any
+    /// allocation, journaling or installation; replay installs verbatim
+    /// through `apply_resolved_continuous_effect` and never reaches here.
+    fn transient_duration_begins(
+        &mut self,
+        source_id: ObjectId,
+        controller: PlayerId,
+        duration: &Duration,
+        affected: &TargetFilter,
+        bindings: TransientContinuousEffectBindings,
+    ) -> bool {
+        if !duration.is_for_as_long_as() {
+            return true;
+        }
+        crate::game::layers::flush_layers(self);
+        crate::game::layers::resolved_duration_begins(
+            self, duration, controller, source_id, affected, bindings,
+        )
+    }
+
+    /// Installs and journals an effect whose duration has already been found to
+    /// start; reached only through the checked registration entry points above.
+    #[allow(clippy::too_many_arguments)]
+    fn install_started_transient_continuous_effect(
         &mut self,
         source_id: ObjectId,
         controller: PlayerId,
@@ -28444,6 +28547,7 @@ impl GameState {
                 duration_subject: bindings.duration_subject,
                 duration_event_source,
                 end_permission,
+                granting_object: bindings.granting_object,
                 source_name,
             },
             expected_installed_count: self.transient_continuous_effects.len(),
@@ -28459,6 +28563,56 @@ impl GameState {
             .record_continuous_effect_install(command)
             .expect("resolved continuous-effect install must have a live journal cause");
         id
+    }
+
+    /// Applies one already-resolved continuous-effect storage operation.
+    /// Neither arm derives characteristics or appends a journal entry.
+    pub fn apply_resolved_continuous_effect_edit(
+        &mut self,
+        edit: &ResolvedContinuousEffectEdit,
+    ) -> Result<(), ResolvedContinuousEffectEditReplayInvariantError> {
+        match edit {
+            ResolvedContinuousEffectEdit::Install(command) => {
+                self.apply_resolved_continuous_effect(command)?;
+            }
+            ResolvedContinuousEffectEdit::Retire(command) => {
+                self.retire_exact_continuous_effects(&command.effects)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Removes a complete settled CR 611.2b selection atomically. The expired
+    /// subject need not still be current: the stored record is the operand.
+    pub(crate) fn retire_exact_continuous_effects(
+        &mut self,
+        effects: &[TransientContinuousEffect],
+    ) -> Result<(), ResolvedContinuousEffectRetirementInvariantError> {
+        ResolvedContinuousEffectRetirementCommand::validate_effects(effects)?;
+        for effect in effects {
+            let mut matching = self
+                .transient_continuous_effects
+                .iter()
+                .filter(|stored| stored.id == effect.id);
+            let stored = matching.next().ok_or(
+                ResolvedContinuousEffectRetirementInvariantError::MissingEffect(effect.id),
+            )?;
+            if matching.next().is_some() {
+                return Err(
+                    ResolvedContinuousEffectRetirementInvariantError::AmbiguousStoredId(effect.id),
+                );
+            }
+            if stored != effect {
+                return Err(
+                    ResolvedContinuousEffectRetirementInvariantError::EffectMismatch(effect.id),
+                );
+            }
+        }
+        let ids: std::collections::HashSet<_> = effects.iter().map(|effect| effect.id).collect();
+        self.transient_continuous_effects
+            .retain(|effect| !ids.contains(&effect.id));
+        self.layers_dirty.mark_full();
+        Ok(())
     }
 
     /// Installs one already-resolved CR 611.2a continuous effect verbatim.
@@ -32440,6 +32594,7 @@ mod tests {
             condition: None,
             duration_subject: Some(ObjectIncarnationRef::of(ObjectId(9), 3)),
             end_permission: None,
+            granting_object: None,
             duration_event_source: None,
             source_name: String::new(),
         };
@@ -41797,24 +41952,27 @@ mod tests {
         state.objects.insert(ObjectId(12), layer_copy);
         let recipient = ObjectIncarnationRef::from_object(&state.objects[&ObjectId(12)]);
         let copy_source = ObjectIncarnationRef::from_object(&state.objects[&ObjectId(10)]);
-        let copy_effect_id = state.add_transient_continuous_effect_with_bindings(
-            ObjectId(12),
-            PlayerId(0),
-            Duration::Permanent,
-            TargetFilter::SpecificObject { id: ObjectId(12) },
-            vec![ContinuousModification::CopyValues {
-                values: Box::new(copied_values.clone()),
-                display_source: crate::game::game_object::DisplaySource::Card,
-                printed_ref: Some(printed_ref.clone()),
-                token_image_ref: None,
-                token_art: None,
-            }],
-            None,
-            TransientContinuousEffectBindings {
-                affected_recipient: Some(recipient),
-                duration_subject: Some(copy_source),
-            },
-        );
+        let copy_effect_id = state
+            .add_transient_continuous_effect_with_bindings(
+                ObjectId(12),
+                PlayerId(0),
+                Duration::Permanent,
+                TargetFilter::SpecificObject { id: ObjectId(12) },
+                vec![ContinuousModification::CopyValues {
+                    values: Box::new(copied_values.clone()),
+                    display_source: crate::game::game_object::DisplaySource::Card,
+                    printed_ref: Some(printed_ref.clone()),
+                    token_image_ref: None,
+                    token_art: None,
+                }],
+                None,
+                TransientContinuousEffectBindings {
+                    affected_recipient: Some(recipient),
+                    duration_subject: Some(copy_source),
+                    granting_object: None,
+                },
+            )
+            .expect("the fixture's duration begins");
         crate::game::printed_cards::apply_copiable_values(
             state
                 .objects
@@ -41891,24 +42049,27 @@ mod tests {
         state.objects.insert(ObjectId(12), recipient);
         let recipient_ref = ObjectIncarnationRef::from_object(&state.objects[&ObjectId(12)]);
         let source_ref = ObjectIncarnationRef::from_object(&state.objects[&ObjectId(10)]);
-        let copy_effect_id = state.add_transient_continuous_effect_with_bindings(
-            ObjectId(12),
-            PlayerId(0),
-            Duration::Permanent,
-            TargetFilter::SpecificObject { id: ObjectId(12) },
-            vec![ContinuousModification::CopyValues {
-                values: Box::new(copied_values),
-                display_source: crate::game::game_object::DisplaySource::Card,
-                printed_ref: Some(top_printed_ref),
-                token_image_ref: None,
-                token_art: None,
-            }],
-            None,
-            TransientContinuousEffectBindings {
-                affected_recipient: Some(recipient_ref),
-                duration_subject: Some(source_ref),
-            },
-        );
+        let copy_effect_id = state
+            .add_transient_continuous_effect_with_bindings(
+                ObjectId(12),
+                PlayerId(0),
+                Duration::Permanent,
+                TargetFilter::SpecificObject { id: ObjectId(12) },
+                vec![ContinuousModification::CopyValues {
+                    values: Box::new(copied_values),
+                    display_source: crate::game::game_object::DisplaySource::Card,
+                    printed_ref: Some(top_printed_ref),
+                    token_image_ref: None,
+                    token_art: None,
+                }],
+                None,
+                TransientContinuousEffectBindings {
+                    affected_recipient: Some(recipient_ref),
+                    duration_subject: Some(source_ref),
+                    granting_object: None,
+                },
+            )
+            .expect("the fixture's duration begins");
         crate::game::printed_cards::apply_copiable_values(
             state
                 .objects
