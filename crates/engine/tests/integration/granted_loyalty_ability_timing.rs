@@ -213,7 +213,7 @@ fn granted_loyalty_ability_requires_empty_stack() {
     assert_eq!(loyalty(&r, b), Some(4));
 }
 
-/// The Wandering Emperor under P0, entered on `entered_turn`, with the game
+/// The Wandering Emperor under P0, entered this turn if `entered_this_turn` (else the previous turn), with the game
 /// at P1's declare-attackers step and P0 holding priority.
 fn emperor_board(entered_this_turn: bool) -> (GameRunner, ObjectId, ObjectId) {
     let (mut s, ids) = board(1);
