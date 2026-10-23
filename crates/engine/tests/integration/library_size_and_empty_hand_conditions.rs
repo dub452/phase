@@ -13,7 +13,7 @@ use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::CastingPermission;
 use engine::types::actions::GameAction;
-use engine::types::game_state::{ExileLinkKind, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, ExileLinkKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -165,6 +165,7 @@ fn activate_play_ability(runner: &mut GameRunner, land: ObjectId) -> bool {
         .act(GameAction::ActivateAbility {
             source_id: land,
             ability_index: 1,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("CR 602.5: the play ability is activatable whatever the condition");
     settle_stack_accepting_offer(runner)
@@ -311,6 +312,7 @@ fn shelldock_isle_checks_library_size_on_resolution_not_activation() {
         .act(GameAction::ActivateAbility {
             source_id: board.land,
             ability_index: 1,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("CR 602.5: activation is not gated by the condition");
     assert_eq!(
