@@ -10998,11 +10998,16 @@ fn parse_a_graveyard_size_condition(input: &str) -> OracleResult<'_, StaticCondi
 /// Lifted through [`existential_player_predicate`] over
 /// `PlayerRelation::All` with a library `ZoneCardCount` scalar. Its embedded
 /// `CountScope::Controller` is inert under `PlayerAttribute`: the runtime
-/// reads each candidate player's own library (`candidate_player_scalar`), and
-/// players who have left the game are not candidates.
+/// reads each candidate player's own library
+/// (`candidate_player_scalar_with_state`), and players who have left the game
+/// are not candidates. The "N or fewer / N or more" threshold is the shared
+/// `parse_amount_threshold` grammar.
 fn parse_a_library_size_condition(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, (comparator, n)) =
-        preceded(tag("a library has "), parse_library_size_threshold).parse(input)?;
+    let (rest, (n, comparator)) = preceded(
+        tag("a library has "),
+        terminated(parse_amount_threshold, tag(" cards in it")),
+    )
+    .parse(input)?;
     Ok((
         rest,
         existential_player_predicate(
@@ -11017,19 +11022,6 @@ fn parse_a_library_size_condition(input: &str) -> OracleResult<'_, StaticConditi
             QuantityExpr::Fixed { value: n as i32 },
         ),
     ))
-}
-
-/// "N or fewer cards in it" / "N or more cards in it" — the threshold tail of
-/// the library-size predicate, returning the comparator it names and `N`.
-fn parse_library_size_threshold(input: &str) -> OracleResult<'_, (Comparator, u32)> {
-    let (rest, n) = parse_number(input)?;
-    let (rest, comparator) = alt((
-        value(Comparator::LE, tag(" or fewer")),
-        value(Comparator::GE, tag(" or more")),
-    ))
-    .parse(rest)?;
-    let (rest, _) = tag(" cards in it").parse(rest)?;
-    Ok((rest, (comparator, n)))
 }
 
 fn parse_opponent_controls_at_least_more_than_you(
