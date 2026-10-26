@@ -33219,8 +33219,11 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
         // land during resolution under the land-play allowance and own-turn
         // rules (CR 305.2b / CR 305.3) and casts a spell as usual. A PAID Play
         // stays lingering (the paid resolution offer has no land arm), and the
-        // plural/batch anaphors ("cards exiled …", "one of those N cards") are
-        // excluded (no resolution-scoped batch window plays lands). CR 712.12: a
+        // batch anaphors ("cards exiled …", "one of those N cards") are excluded
+        // (no resolution-scoped batch window plays lands); the plural `Other`
+        // anaphors ("them", "those cards") select the driver and rely on the
+        // runtime single-card gate (`single_resolution_card`) to keep a
+        // multi-card binding on the lingering grant. CR 712.12: a
         // land//land modal card, bound anywhere but the graveyard, keeps the
         // lingering grant at runtime (`ResolutionPlayRoute::LingeringFaceElection`)
         // — that covers Hideaway exile and Djinn-class library cards, which the

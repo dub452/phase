@@ -2548,7 +2548,7 @@ impl ResolutionCastWindow {
 pub enum CastMechanism {
     /// CR 118.9 / CR 611.2a: a per-object permission exercised at a LATER
     /// priority window. Chosen for paid batch casts (the free-cast window
-    /// primitive models no mana payment), batch land plays (no
+    /// primitive models no mana payment), CR 305.1 batch land plays (no
     /// resolution-scoped window plays lands), and any clause that states a
     /// durational scope. At runtime a land//land modal DFC bound outside the
     /// graveyard also keeps a lingering grant (CR 712.12 election — follow-up).
