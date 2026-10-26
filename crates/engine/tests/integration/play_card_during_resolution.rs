@@ -34,6 +34,7 @@ use engine::types::zones::Zone;
 use crate::support::shared_card_db as load_db;
 
 const SHELLDOCK_ISLE: &str = "Hideaway 4 (When this land enters, look at the top four cards of your library, exile one face down, then put the rest on the bottom in a random order.)\nThis land enters tapped.\n{T}: Add {U}.\n{U}, {T}: You may play the exiled card without paying its mana cost if a library has twenty or fewer cards in it.";
+const MOSSWORT_BRIDGE: &str = "Hideaway 4 (When this land enters, look at the top four cards of your library, exile one face down, then put the rest on the bottom in a random order.)\nThis land enters tapped.\n{T}: Add {G}.\n{G}, {T}: You may play the exiled card without paying its mana cost if creatures you control have total power 10 or greater.";
 const DJINN_OF_WISHES: &str = "Flying\nThis creature enters with three wish counters on it.\n{2}{U}{U}, Remove a wish counter from this creature: Reveal the top card of your library. You may play that card without paying its mana cost. If you don't, exile it.";
 const MINDS_DESIRE: &str = "Shuffle your library. Then exile the top card of your library. Until end of turn, you may play that card without paying its mana cost.\nStorm (When you cast this spell, copy it for each spell cast before it this turn.)";
 const HORN_OF_GREED: &str = "Whenever a player plays a land, that player draws a card.";
@@ -257,12 +258,31 @@ fn shelldock_board_at_depth(
     real_db: bool,
     hidden_depth: usize,
 ) -> Option<ShelldockBoard> {
+    hideaway_board_at_depth(
+        "Shelldock Isle",
+        SHELLDOCK_ISLE,
+        stage,
+        extras,
+        real_db,
+        hidden_depth,
+    )
+}
+
+/// [`shelldock_board_at_depth`] for any Hideaway land built from `oracle`.
+fn hideaway_board_at_depth(
+    name: &str,
+    oracle: &str,
+    stage: impl FnOnce(&mut GameScenario) -> ObjectId,
+    extras: impl FnOnce(&mut GameScenario),
+    real_db: bool,
+    hidden_depth: usize,
+) -> Option<ShelldockBoard> {
     let db = if real_db { Some(load_db()?) } else { None };
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let land = scenario
-        .add_land_to_hand(P0, "Shelldock Isle")
-        .from_oracle_text(SHELLDOCK_ISLE)
+        .add_land_to_hand(P0, name)
+        .from_oracle_text(oracle)
         .id();
     for i in 0..3 {
         scenario.add_card_to_library_top(P0, &format!("Library Card {i}"));
@@ -282,7 +302,7 @@ fn shelldock_board_at_depth(
             object_id: land,
             card_id,
         })
-        .expect("playing Shelldock Isle");
+        .expect("playing the Hideaway land");
     let mut hid = false;
     for _ in 0..80 {
         match runner.state().waiting_for.clone() {
@@ -342,7 +362,17 @@ fn activate_shelldock(
     accept: bool,
     target: Option<TargetRef>,
 ) -> Drive {
-    fund(&mut board.runner, P0, ManaType::Blue, 1);
+    activate_hideaway(board, ManaType::Blue, accept, target)
+}
+
+/// Activate a Hideaway land's `{C}, {T}` play ability, paying `mana`.
+fn activate_hideaway(
+    board: &mut ShelldockBoard,
+    mana: ManaType,
+    accept: bool,
+    target: Option<TargetRef>,
+) -> Drive {
+    fund(&mut board.runner, P0, mana, 1);
     board
         .runner
         .act(GameAction::ActivateAbility {
@@ -350,7 +380,7 @@ fn activate_shelldock(
             ability_index: 1,
             payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
-        .expect("activating Shelldock Isle's play ability");
+        .expect("activating the Hideaway land's play ability");
     settle(&mut board.runner, board.hidden, accept, target)
 }
 
@@ -650,6 +680,40 @@ fn declining_a_hidden_spell_land_modal_card_leaves_it_hidden() {
     assert!(board.runner.state().objects[&board.hidden]
         .casting_permissions
         .is_empty());
+}
+
+/// R5 — CR 608.2c + CR 608.2g: declining a non-modal Hideaway play (Mosswort
+/// Bridge, its condition met) leaves the hidden spell face down in exile, linked
+/// to the land, with no lingering grant; the instruction does not wait for a
+/// later priority window.
+#[test]
+fn declining_mosswort_bridges_hidden_spell_leaves_it_hidden_without_a_grant() {
+    let mut board = hideaway_board_at_depth(
+        "Mosswort Bridge",
+        MOSSWORT_BRIDGE,
+        stage_instant,
+        |s| {
+            s.add_creature(P0, "Power Ten", 10, 1);
+        },
+        false,
+        0,
+    )
+    .unwrap();
+    let drive = activate_hideaway(&mut board, ManaType::Green, false, None);
+    assert!(drive.offered, "reach-guard: the offer appeared");
+    assert!(
+        board.runner.state().objects[&board.land].tapped,
+        "reach-guard: the ability resolved"
+    );
+    hidden_is_shelldocks_face_down_card(&board);
+    assert!(
+        permissions_from(&board.runner, board.land).is_empty(),
+        "declining grants no permission"
+    );
+    assert!(board.runner.state().objects[&board.hidden]
+        .casting_permissions
+        .is_empty());
+    assert_eq!(board.runner.state().players[0].life, 20, "nothing was cast");
 }
 
 /// R15b — CR 712.12: a land//land modal card (Branchloft Pathway // Boulderloft

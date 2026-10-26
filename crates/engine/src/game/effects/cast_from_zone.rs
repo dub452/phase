@@ -1000,13 +1000,15 @@ pub fn resolve(
     // suppressed it falls past the paid branch (`!without_paying`) and the
     // per-opponent fanout (`is_per_opponent_target_fanout`) to
     // `grant_lingering_permissions`, exactly as the lingering driver does.
-    let play_route = (mode.is_play() && target_ids.len() == 1)
-        .then(|| state.objects.get(&target_ids[0]).map(resolution_play_route))
-        .flatten();
+    let single_card = single_resolution_card(&target_ids);
+    let play_route = single_card
+        .filter(|_| mode.is_play())
+        .and_then(|id| state.objects.get(&id))
+        .map(resolution_play_route);
     let driver_free_cast = driver.is_during_resolution()
         && without_paying
         && alt_ability_cost.is_none()
-        && target_ids.len() == 1
+        && single_card.is_some()
         && play_route != Some(ResolutionPlayRoute::LingeringFaceElection);
 
     // CR 608.2g: A targeted immediate free-cast of a card in a graveyard must
@@ -1309,6 +1311,19 @@ pub(crate) fn exiled_by_source_fallback_binding(
         );
     }
     ExiledBySourceBinding::LinkedExile(linked_ids)
+}
+
+/// CR 608.2g + CR 701.18b: the cardinality authority for a free
+/// `DuringResolution` instruction. It executes as the ability resolves only for
+/// exactly one bound card; any other binding (e.g. a plural "them", or a linked
+/// exile holding several cards) takes [`grant_lingering_permissions`]. Read by
+/// both [`resolve`] and the optional-effect feasibility probe so they cannot
+/// disagree about which route a binding takes.
+pub(crate) fn single_resolution_card(target_ids: &[ObjectId]) -> Option<ObjectId> {
+    match target_ids {
+        [id] => Some(*id),
+        _ => None,
+    }
 }
 
 /// CR 701.18b: how a free single-card Play instruction executes for one card.
