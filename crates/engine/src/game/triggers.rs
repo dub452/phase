@@ -8563,11 +8563,13 @@ pub(crate) fn take_sba_choice_trigger_batch(
 /// Mirrors `batch_or_drain_observer_triggers`' B2 branch: events are queued in
 /// `deferred_triggers` for dispatch once the outer action reaches Priority.
 ///
-/// Used by handlers that return `ActionResult` directly (e.g. `OpponentMayChoice`)
-/// and therefore bypass `run_post_action_pipeline`. Do not call from
-/// `OptionalEffectChoice` — those handlers return through `apply_action`, and
-/// copy-sensitive events such as `SpellCopied` are already collected by their
-/// dedicated resolution owners (`copy_spell.rs`).
+/// Used by handlers that return `ActionResult` directly and therefore bypass
+/// `run_post_action_pipeline` (e.g. `OpponentMayChoice`, and the
+/// `OptionalEffectChoice` accept handler, whose resolution can pause on a
+/// further prompt such as a player-scope iteration's next offer or an entering
+/// permanent's as-enters choice). Copy-sensitive events such as `SpellCopied`
+/// are excluded: their dedicated resolution owners (`copy_spell.rs`) collect
+/// them.
 pub(crate) fn park_observer_triggers_if_paused(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
@@ -8582,8 +8584,27 @@ pub(crate) fn park_observer_triggers_if_paused(
     // CR 601.2h + CR 602.2b + CR 603.3: under a live announcement these events
     // wait in its carrier; only the span it does not own is parked here.
     let owned = super::announcement_triggers::take_inline_trigger_span(state, events, slice_start);
-    let trigger_events: Vec<GameEvent> = filter_consumed_trigger_events_from(
-        &events[..owned.end],
+    let trigger_events = paused_observer_trigger_events(state, &events[..owned.end], slice_start);
+    if !trigger_events.is_empty() {
+        collect_triggers_into_deferred(state, &trigger_events);
+    }
+}
+
+/// CR 603.2c + CR 614.12a: the observer events of `events[slice_start..]` that
+/// this collector owns. An entry event parked in `state.deferred_entry_events`
+/// by a mid-entry choice (as-enters choice, copy/counter choice, a played land's
+/// pre-entry payment) is owned by its replay/flush site
+/// (`engine_replacement::replay_deferred_entry_events` /
+/// `flush_deferred_entry_events_into_priority_scan`), which scans it against the
+/// realized post-choice object (CR 603.10); collecting it here too would trigger
+/// the observer twice. Mirrors `engine_priority::run_post_action_pipeline`.
+fn paused_observer_trigger_events(
+    state: &GameState,
+    events: &[GameEvent],
+    slice_start: usize,
+) -> Vec<GameEvent> {
+    filter_consumed_trigger_events_from(
+        events,
         slice_start,
         TriggerCollectionRequester::Ordinary,
         &state.consumed_before_priority_trigger_events,
@@ -8596,12 +8617,9 @@ pub(crate) fn park_observer_triggers_if_paused(
         !matches!(
             ev,
             GameEvent::PhaseChanged { .. } | GameEvent::SpellCopied { .. }
-        )
+        ) && !state.deferred_entry_events.contains(ev)
     })
-    .collect();
-    if !trigger_events.is_empty() {
-        collect_triggers_into_deferred(state, &trigger_events);
-    }
+    .collect()
 }
 
 /// CR 603.2 + CR 603.3b: For choice handlers that return `ActionResult` directly
@@ -8623,20 +8641,7 @@ pub(crate) fn collect_and_drain_observer_triggers_if_settled(
     // CR 601.2h + CR 602.2b + CR 603.3: under a live announcement these events
     // wait in its carrier; only the span it does not own is collected here.
     let owned = super::announcement_triggers::take_inline_trigger_span(state, events, slice_start);
-    let trigger_events: Vec<GameEvent> = filter_consumed_trigger_events_from(
-        &events[..owned.end],
-        slice_start,
-        TriggerCollectionRequester::Ordinary,
-        &state.consumed_before_priority_trigger_events,
-    )
-    .into_iter()
-    .filter(|ev| {
-        !matches!(
-            ev,
-            GameEvent::PhaseChanged { .. } | GameEvent::SpellCopied { .. }
-        )
-    })
-    .collect();
+    let trigger_events = paused_observer_trigger_events(state, &events[..owned.end], slice_start);
     if !trigger_events.is_empty() {
         collect_triggers_into_deferred(state, &trigger_events);
     }
@@ -43307,6 +43312,35 @@ pub mod tests {
             assert!(
                 state.deferred_triggers.is_empty() && state.stack.is_empty(),
                 "live accepted marker (settled={settled}): the helper must collect nothing"
+            );
+        }
+    }
+
+    /// U-D1 — CR 603.2c + CR 614.12a: an entry event parked in
+    /// `deferred_entry_events` by a mid-entry choice belongs to its replay/flush
+    /// owner, so neither paused-resolution helper collects it, and neither
+    /// touches the owner's store. The paired positive is the reach guard in
+    /// `both_observer_helpers_are_no_ops_under_either_triggered_mana_authority`:
+    /// the same fixture without the parked event IS collected.
+    #[test]
+    fn observer_helpers_leave_a_deferred_entry_event_to_its_replay_owner() {
+        for settled in [false, true] {
+            let (mut state, mut events) = observer_helper_fixture(settled);
+            let parked = events[0].clone();
+            state.deferred_entry_events.push(parked.clone());
+            if settled {
+                collect_and_drain_observer_triggers_if_settled(&mut state, &mut events, 0);
+            } else {
+                park_observer_triggers_if_paused(&mut state, &mut events, 0);
+            }
+            assert!(
+                state.deferred_triggers.is_empty() && state.stack.is_empty(),
+                "settled={settled}: the parked entry event must not be collected here"
+            );
+            assert_eq!(
+                state.deferred_entry_events,
+                vec![parked],
+                "settled={settled}: the owner's store is untouched"
             );
         }
     }

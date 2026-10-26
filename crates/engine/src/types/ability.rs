@@ -2425,7 +2425,11 @@ pub enum CastFromZoneDriver {
     /// last-time-counter trigger (CR 702.62a) so a suspended sorcery recast at
     /// upkeep is not blocked by the sorcery-speed gate (issue #1520), and by
     /// Rebound's next-upkeep arming hook (CR 702.88a) for the same reason
-    /// (issue #6461).
+    /// (issue #6461). Also set by a free, no-duration single-card PLAY
+    /// instruction (Hideaway's "you may play the exiled card without paying its
+    /// mana cost", Djinn of Wishes' "you may play that card …"): CR 701.18b +
+    /// CR 305.2a, the card is cast during resolution if it is a spell, or played
+    /// as a land during resolution if it is a land.
     DuringResolution,
     /// CR 608.2g: Open a RESOLUTION-SCOPED free-cast window over the batch of
     /// cards the same resolution just produced ("… from among them") — the
@@ -2544,9 +2548,10 @@ impl ResolutionCastWindow {
 pub enum CastMechanism {
     /// CR 118.9 / CR 611.2a: a per-object permission exercised at a LATER
     /// priority window. Chosen for paid batch casts (the free-cast window
-    /// primitive models no mana payment), CR 305.1 land plays (no
-    /// during-resolution mechanism exists), and any clause that states a
-    /// durational scope.
+    /// primitive models no mana payment), batch land plays (no
+    /// resolution-scoped window plays lands), and any clause that states a
+    /// durational scope. At runtime a land//land modal DFC bound outside the
+    /// graveyard also keeps a lingering grant (CR 712.12 election — follow-up).
     LingeringPermission,
     /// CR 608.2g: cast exactly ONE card as the granting ability resolves. The
     /// self-library-peek form ("look at the top four cards of your library. You

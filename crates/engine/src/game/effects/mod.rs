@@ -16200,6 +16200,7 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
             mode,
             target,
             constraint,
+            driver,
             ..
         } => {
             // CR 608.2d: An optional exact "cast/play that card" instruction is
@@ -16221,11 +16222,19 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
             // lands never enter the cast path, fixed permission constraints use
             // the casting pipeline's typed offer-time authority, and the cloned
             // resolver retains all other CR 601 legality checks. Dynamic/X
-            // constraints remain deferred by that shared authority. `Play`
-            // permits lands, so this probe is Cast-only. An empty bound set
-            // retains the original whole-ability dry-run, which keeps successful
-            // zone-selection fallbacks feasible while preserving other errors.
-            if matches!(mode, CardPlayMode::Cast) {
+            // constraints remain deferred by that shared authority. An empty
+            // bound set retains the original whole-ability dry-run, which keeps
+            // successful zone-selection fallbacks feasible while preserving
+            // other errors.
+            //
+            // CR 701.18b + CR 608.2d + CR 305.2b + CR 305.3: a `Play`
+            // instruction that resolves now (`DuringResolution`) is probed too,
+            // per card through `cast_from_zone::resolution_play_route` — the
+            // route `resolve` takes — so a land the player cannot play right now
+            // (allowance reached, not their turn) is not offered. A lingering
+            // `Play` grant is always grantable and stays unprobed.
+            let resolves_play_now = mode.is_play() && driver.is_during_resolution();
+            if matches!(mode, CardPlayMode::Cast) || resolves_play_now {
                 // CR 608.2d: An optional hand-pick cast ("you may cast a permanent
                 // spell … from your hand") with no eligible card is impossible.
                 // This only needs to be treated as infeasible up front when the
@@ -16237,17 +16246,18 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
                 // offerable — its empty pick simply resolves as a no-op — so the
                 // whole-ability dry-run below still governs it. The predicate
                 // returns `None` for pre-bound / non-hand `CastFromZone` classes.
-                if ability
-                    .sub_ability
-                    .as_deref()
-                    .is_some_and(should_resolve_subability_on_optional_decline)
+                if matches!(mode, CardPlayMode::Cast)
+                    && ability
+                        .sub_ability
+                        .as_deref()
+                        .is_some_and(should_resolve_subability_on_optional_decline)
                 {
                     if let Some(true) = cast_from_zone::hand_pick_eligible_is_empty(state, ability)
                     {
                         return true;
                     }
                 }
-                let bound_objects: Vec<_> = ability
+                let mut bound_objects: Vec<_> = ability
                     .targets
                     .iter()
                     .filter_map(|target| match target {
@@ -16255,6 +16265,21 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
                         TargetRef::Player(_) => None,
                     })
                     .collect();
+                // CR 406.6 + CR 607.2a: an unbound "the exiled card" Play binds
+                // through the same authority `resolve` uses, so the per-card
+                // probe below asks about the card resolution would play. The
+                // private looked-at-library pick keeps the whole-ability dry run.
+                if bound_objects.is_empty()
+                    && resolves_play_now
+                    && target.references_exiled_by_source()
+                {
+                    bound_objects = match cast_from_zone::exiled_by_source_fallback_binding(
+                        state, ability, target,
+                    ) {
+                        cast_from_zone::ExiledBySourceBinding::LinkedExile(ids) => ids,
+                        cast_from_zone::ExiledBySourceBinding::LookedAtLibrary(_) => Vec::new(),
+                    };
+                }
                 if bound_objects.is_empty() {
                     let mut simulated = state.clone();
                     return cast_from_zone::resolve(&mut simulated, ability, &mut Vec::new())
@@ -16265,14 +16290,33 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
                     let Some(object) = state.objects.get(&id) else {
                         return false;
                     };
-                    if object
+                    if resolves_play_now {
+                        match cast_from_zone::resolution_play_route(object) {
+                            cast_from_zone::ResolutionPlayRoute::PlayLand => {
+                                return crate::game::engine::resolution_land_play_is_legal(
+                                    state,
+                                    ability.controller,
+                                    id,
+                                );
+                            }
+                            // CR 712.12: the lingering land-face fallback grants
+                            // a permission, which is always grantable.
+                            cast_from_zone::ResolutionPlayRoute::LingeringFaceElection => {
+                                return true;
+                            }
+                            cast_from_zone::ResolutionPlayRoute::CastSpell => {}
+                        }
+                    } else if object
                         .card_types
                         .core_types
                         .contains(&crate::types::card_type::CoreType::Land)
-                        || !crate::game::casting::cast_permission_constraint_allows_cast(
-                            state, object, constraint, None,
-                        )
                     {
+                        // CR 305.9: a land is never cast.
+                        return false;
+                    }
+                    if !crate::game::casting::cast_permission_constraint_allows_cast(
+                        state, object, constraint, None,
+                    ) {
                         return false;
                     }
 
@@ -57765,6 +57809,247 @@ mod tests {
                 "a valid typed cast from {zone:?} must remain offerable"
             );
         }
+    }
+
+    /// A Play instruction on `card`: bound (`ParentTarget`, `targets = [card]`)
+    /// or unbound (`ExiledBySource`, `targets = []`).
+    fn play_instruction(
+        source: ObjectId,
+        bound: Option<ObjectId>,
+        driver: crate::types::ability::CastFromZoneDriver,
+    ) -> ResolvedAbility {
+        use crate::types::ability::CardPlayMode;
+        let mut ability = ResolvedAbility::new(
+            Effect::CastFromZone {
+                target: if bound.is_some() {
+                    TargetFilter::ParentTarget
+                } else {
+                    TargetFilter::ExiledBySource
+                },
+                without_paying_mana_cost: true,
+                mode: CardPlayMode::Play,
+                cast_transformed: false,
+                alt_ability_cost: None,
+                constraint: None,
+                duration: None,
+                driver,
+                mana_spend_permission: None,
+                additional_cost: None,
+                cast_cost_modifier: None,
+            },
+            bound.map(TargetRef::Object).into_iter().collect(),
+            source,
+            PlayerId(0),
+        );
+        ability.optional = true;
+        ability
+    }
+
+    /// P0's turn with a play source on the battlefield and one land card in
+    /// `zone`, optionally a land//land modal card (CR 712.12).
+    fn play_feasibility_board(
+        zone: Zone,
+        land_land_modal: bool,
+    ) -> (GameState, ObjectId, ObjectId) {
+        let mut state = GameState::new_two_player(42);
+        state.active_player = PlayerId(0);
+        let source = create_object(
+            &mut state,
+            CardId(910),
+            PlayerId(0),
+            "Play Source".to_string(),
+            Zone::Battlefield,
+        );
+        let land = create_object(
+            &mut state,
+            CardId(911),
+            PlayerId(0),
+            "Bound Land".to_string(),
+            zone,
+        );
+        let object = state.objects.get_mut(&land).unwrap();
+        object.card_types.core_types.push(CoreType::Land);
+        object.base_card_types = object.card_types.clone();
+        if land_land_modal {
+            let mut back_types = crate::types::card_type::CardType::default();
+            back_types.core_types.push(CoreType::Land);
+            object.back_face = Some(crate::game::game_object::BackFaceData {
+                name: "Back Pathway".to_string(),
+                card_types: back_types,
+                layout_kind: Some(crate::types::card::LayoutKind::Modal),
+                ..Default::default()
+            });
+        }
+        (state, source, land)
+    }
+
+    fn at_land_allowance(state: &mut GameState) {
+        state.lands_played_this_turn = 1;
+        state.players[0].lands_played_this_turn = 1;
+    }
+
+    fn link_exiled(state: &mut GameState, source: ObjectId, exiled: ObjectId) {
+        state.exile_links.push(crate::types::game_state::ExileLink {
+            exiled_id: exiled,
+            source_id: source,
+            kind: crate::types::game_state::ExileLinkKind::TrackedBySource,
+        });
+    }
+
+    /// CR 608.2d + CR 305.2b + CR 305.3: a Play that resolves now is offered only
+    /// when its bound land can be played right now; a lingering Play grant is
+    /// always grantable and unprobed.
+    #[test]
+    fn optional_play_now_feasibility_tracks_land_play_legality() {
+        use crate::types::ability::CastFromZoneDriver;
+
+        let (state, source, land) = play_feasibility_board(Zone::Exile, false);
+        let now = play_instruction(source, Some(land), CastFromZoneDriver::DuringResolution);
+        assert!(
+            !optional_effect_is_infeasible(&state, &now),
+            "a land P0 can play now is offered"
+        );
+
+        let (mut state, source, land) = play_feasibility_board(Zone::Exile, false);
+        at_land_allowance(&mut state);
+        let now = play_instruction(source, Some(land), CastFromZoneDriver::DuringResolution);
+        assert!(
+            optional_effect_is_infeasible(&state, &now),
+            "CR 305.2b: no land drop left, no offer"
+        );
+        let lingering =
+            play_instruction(source, Some(land), CastFromZoneDriver::LingeringPermission);
+        assert!(
+            !optional_effect_is_infeasible(&state, &lingering),
+            "a lingering Play grant is not probed"
+        );
+
+        let (mut state, source, land) = play_feasibility_board(Zone::Exile, false);
+        state.active_player = PlayerId(1);
+        let now = play_instruction(source, Some(land), CastFromZoneDriver::DuringResolution);
+        assert!(
+            optional_effect_is_infeasible(&state, &now),
+            "CR 305.3: not P0's turn, no offer"
+        );
+    }
+
+    /// CR 712.12: a bound land//land modal card in the LIBRARY takes the
+    /// lingering land-face fallback, which is always grantable; the same land
+    /// without a modal back face is probed as a land play.
+    #[test]
+    fn optional_play_now_feasibility_keeps_the_land_land_modal_fallback_offerable() {
+        use crate::types::ability::CastFromZoneDriver;
+
+        let (mut state, source, card) = play_feasibility_board(Zone::Library, true);
+        at_land_allowance(&mut state);
+        let now = play_instruction(source, Some(card), CastFromZoneDriver::DuringResolution);
+        assert!(
+            !optional_effect_is_infeasible(&state, &now),
+            "the land//land fallback lingers, as at base"
+        );
+        state.active_player = PlayerId(1);
+        assert!(
+            !optional_effect_is_infeasible(&state, &now),
+            "the land//land fallback lingers on an opponent's turn too"
+        );
+
+        let (mut state, source, land) = play_feasibility_board(Zone::Library, false);
+        at_land_allowance(&mut state);
+        let now = play_instruction(source, Some(land), CastFromZoneDriver::DuringResolution);
+        assert!(
+            optional_effect_is_infeasible(&state, &now),
+            "reach-guard: only the modal back face differs, and a plain land at the \
+             allowance is not offered"
+        );
+    }
+
+    /// CR 406.6 + CR 607.2a + CR 608.2d: an UNBOUND "the exiled card" Play is
+    /// probed on the card `resolve` would bind (the source's linked exile).
+    #[test]
+    fn optional_unbound_play_now_feasibility_binds_the_linked_exile() {
+        use crate::types::ability::CastFromZoneDriver;
+
+        let (mut state, source, land) = play_feasibility_board(Zone::Exile, false);
+        link_exiled(&mut state, source, land);
+        let unbound = play_instruction(source, None, CastFromZoneDriver::DuringResolution);
+        assert!(
+            !optional_effect_is_infeasible(&state, &unbound),
+            "reach-guard: a playable linked land is offered"
+        );
+        at_land_allowance(&mut state);
+        assert!(
+            optional_effect_is_infeasible(&state, &unbound),
+            "CR 305.2b: the linked land cannot be played, so no offer"
+        );
+
+        let (mut state, source, land) = play_feasibility_board(Zone::Exile, false);
+        link_exiled(&mut state, source, land);
+        state.active_player = PlayerId(1);
+        let unbound = play_instruction(source, None, CastFromZoneDriver::DuringResolution);
+        assert!(
+            optional_effect_is_infeasible(&state, &unbound),
+            "CR 305.3: not P0's turn, no offer"
+        );
+
+        // CR 712.12: a linked land//land modal card lingers, so it stays offered.
+        let (mut state, source, card) = play_feasibility_board(Zone::Exile, true);
+        link_exiled(&mut state, source, card);
+        at_land_allowance(&mut state);
+        let unbound = play_instruction(source, None, CastFromZoneDriver::DuringResolution);
+        assert!(!optional_effect_is_infeasible(&state, &unbound));
+
+        // No link and no look: the whole-ability dry run still governs, and
+        // `resolve` reports "nothing to cast".
+        let (state, source, _) = play_feasibility_board(Zone::Exile, false);
+        let unbound = play_instruction(source, None, CastFromZoneDriver::DuringResolution);
+        assert!(!optional_effect_is_infeasible(&state, &unbound));
+    }
+
+    /// CR 608.2c: Djinn of Wishes' "If you don't, exile it" is the printed
+    /// decline branch of the optional Play — declining still runs it.
+    #[test]
+    fn djinn_shaped_decline_branch_is_selected_on_decline() {
+        use crate::types::ability::CastFromZoneDriver;
+
+        let card = ObjectId(912);
+        let mut ability = play_instruction(
+            ObjectId(910),
+            Some(card),
+            CastFromZoneDriver::DuringResolution,
+        );
+        let mut exile_it = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Exile,
+                target: TargetFilter::ParentTarget,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+            vec![],
+            ObjectId(910),
+            PlayerId(0),
+        );
+        exile_it.condition = Some(AbilityCondition::Not {
+            condition: Box::new(AbilityCondition::effect_performed()),
+        });
+        ability.sub_ability = Some(Box::new(exile_it));
+        let state = GameState::new_two_player(42);
+        let branch = optional_decline_branch(&state, &ability).expect("the decline branch runs");
+        assert!(matches!(
+            branch.effect,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                ..
+            }
+        ));
     }
 
     /// CR 608.2d + CR 122.1: An optional chosen-counter placement is infeasible

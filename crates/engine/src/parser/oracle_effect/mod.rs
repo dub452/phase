@@ -31622,7 +31622,7 @@ impl FromAmongBatchLowering {
 /// is lowered.
 ///
 /// Scoped to a FREE cast (`without_paying`) in `Cast` mode: CR 305.1 land plays
-/// are a special action with no during-resolution mechanism, and a PAID batch
+/// are a special action and no resolution-scoped batch window can play a land, and a PAID batch
 /// cast (Sanwell, Avenger Ace: "you may cast a Vehicle or artifact creature
 /// spell from among them") needs a mana-payment window the free-cast window
 /// primitive does not model, so both ask for the established permission path.
@@ -31663,7 +31663,7 @@ fn from_among_batch_cast_driver(
     // priority window". A PAID batch cast (Sanwell, Avenger Ace: "you may cast a
     // Vehicle or artifact creature spell from among them") needs a mana-payment
     // window the free-cast window primitive does not model, and a CR 305.1 land
-    // play is a special action with no during-resolution mechanism. A duration
+    // play is a special action no resolution-scoped batch window can play. A duration
     // stated INSIDE the clause is the third: Ral, Leyline Prodigy states it
     // mid-clause — "you may cast instant and sorcery spells from among them THIS
     // TURN without paying their mana costs" — where no positional strip seam
@@ -33208,11 +33208,24 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
         // resolution-only free cast (Bring to Light tutors a card into the
         // controller's own exile, then casts it AS this effect resolves — issue
         // #2880). The card goes on the stack now; no standing `ExileWithAltCost`
-        // permission lingers afterward. Restricted to `mode == Cast`: CR 305.1
-        // land plays are a special action, not a cast, and have no
-        // during-resolution casting mechanism — the Play-mode hideaway/wish
-        // cards (Mosswort Bridge, Djinn of Wishes, etc.) must stay on the
-        // lingering-permission path. An `alt_ability_cost` or an explicit
+        // permission lingers afterward.
+        //
+        // CR 701.18b + CR 608.2g + CR 305.2a: a FREE single-card "play the
+        // exiled card / that card / it" with no duration resolves now too
+        // (Hideaway: Shelldock Isle, Mosswort Bridge, Fight Rigging; Djinn of
+        // Wishes): playing a card means casting it or playing it as a land,
+        // whichever is appropriate, and the play happens as the ability
+        // resolves ("You can't play it later in the turn"). The resolver plays a
+        // land during resolution under the land-play allowance and own-turn
+        // rules (CR 305.2b / CR 305.3) and casts a spell as usual. A PAID Play
+        // stays lingering (the paid resolution offer has no land arm), and the
+        // plural/batch anaphors ("cards exiled …", "one of those N cards") are
+        // excluded (no resolution-scoped batch window plays lands). CR 712.12: a
+        // land//land modal card, bound anywhere but the graveyard, keeps the
+        // lingering grant at runtime (`ResolutionPlayRoute::LingeringFaceElection`)
+        // — that covers Hideaway exile and Djinn-class library cards, which the
+        // grant delivers to exile; a spell//land MDFC is cast by its front face
+        // (CR 712.8a). An `alt_ability_cost` or an explicit
         // `duration` likewise keeps the lingering grant (Cruelclaw's discard
         // alt cost; Rebound-style durational recasts). A `constraint` (a
         // conditional free-cast such as Beseech the Mirror's "you may cast the
@@ -33246,7 +33259,14 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
         // batch an earlier instruction of this resolution produced (Invasion of
         // Alara's two exiled cards). The same during-resolution cast, offered as a
         // one-cast window over that batch rather than as a cast of each member.
-        let resolves_now = mode == CardPlayMode::Cast
+        let mode_resolves_now = match mode {
+            CardPlayMode::Cast => true,
+            CardPlayMode::Play => match matched_anaphor {
+                CastAnaphor::SingularExiledCard | CastAnaphor::Other => without_paying,
+                CastAnaphor::PluralCardsExiled | CastAnaphor::OneOfBatch => false,
+            },
+        };
+        let resolves_now = mode_resolves_now
             && alt_ability_cost.is_none()
             && duration.is_none()
             && constraint.is_none()
