@@ -1378,7 +1378,7 @@ fn play_land_during_resolution_instruction(
         | Some(crate::game::engine::LandPlayCommit::Entered)
         | Some(crate::game::engine::LandPlayCommit::Prevented) => {}
         Some(crate::game::engine::LandPlayCommit::AwaitingEntryChoice(waiting_for)) => {
-            state.waiting_for = waiting_for;
+            state.waiting_for = *waiting_for;
         }
     }
     Ok(())

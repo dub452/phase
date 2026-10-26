@@ -18536,7 +18536,7 @@ fn handle_play_land(
     ) {
         // Player retains priority after playing a land
         LandPlayCommit::Entered => Ok(WaitingFor::Priority { player }),
-        LandPlayCommit::AwaitingEntryChoice(waiting_for) => Ok(waiting_for),
+        LandPlayCommit::AwaitingEntryChoice(waiting_for) => Ok(*waiting_for),
         LandPlayCommit::Prevented => Ok(WaitingFor::Priority {
             player: state.priority_player,
         }),
@@ -18552,8 +18552,9 @@ pub(crate) enum LandPlayCommit {
     /// The land entered the battlefield and the play was finalized.
     Entered,
     /// CR 614.12a: the play is committed, but an entry replacement or delivery
-    /// choice is pending; the carried `WaitingFor` is that prompt.
-    AwaitingEntryChoice(WaitingFor),
+    /// choice is pending; the carried `WaitingFor` is that prompt. Boxed to
+    /// keep the enum small (clippy::large_enum_variant).
+    AwaitingEntryChoice(Box<WaitingFor>),
     /// CR 614.1: a replacement prevented the land from entering; nothing was
     /// counted.
     Prevented,
@@ -18702,7 +18703,9 @@ fn commit_land_play(
                         // pause drops the `LandPlayed` occurrence emitted above,
                         // so park a clone for the resume to replay (issue #8738).
                         park_land_played_for_deferred_entry(state, player, object_id, origin_zone);
-                        return LandPlayCommit::AwaitingEntryChoice(state.waiting_for.clone());
+                        return LandPlayCommit::AwaitingEntryChoice(Box::new(
+                            state.waiting_for.clone(),
+                        ));
                     }
                 }
                 // CR 305.1 + CR 400.7i: stamp land-play provenance ("where it
@@ -18756,7 +18759,7 @@ fn commit_land_play(
                         events,
                     )
                 {
-                    return LandPlayCommit::AwaitingEntryChoice(next_waiting_for);
+                    return LandPlayCommit::AwaitingEntryChoice(Box::new(next_waiting_for));
                 }
                 return LandPlayCommit::Entered;
             }
@@ -18784,9 +18787,9 @@ fn commit_land_play(
             // resume to replay once the land actually enters (issue #8738).
             park_land_played_for_deferred_entry(state, player, object_id, origin_zone);
 
-            return LandPlayCommit::AwaitingEntryChoice(
+            return LandPlayCommit::AwaitingEntryChoice(Box::new(
                 super::replacement::replacement_choice_waiting_for(player, state),
-            );
+            ));
         }
     }
 
