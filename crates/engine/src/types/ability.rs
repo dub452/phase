@@ -2546,12 +2546,17 @@ impl ResolutionCastWindow {
 /// construct a `CastFromZoneDriver` for a `from among` batch by any other route.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CastMechanism {
-    /// CR 118.9 / CR 611.2a: a per-object permission exercised at a LATER
-    /// priority window. Chosen for paid batch casts (the free-cast window
-    /// primitive models no mana payment), CR 305.1 batch land plays (no
-    /// resolution-scoped window plays lands), and any clause that states a
-    /// durational scope. At runtime a land//land modal DFC bound outside the
-    /// graveyard also keeps a lingering grant (CR 712.12 election — follow-up).
+    /// A per-object permission exercised at a LATER priority window. Chosen
+    /// for:
+    /// - paid batch casts — CR 118.9: the free-cast window primitive models no
+    ///   mana payment, so a cast paying a cost lingers;
+    /// - batch land plays — CR 305.1: playing a land is a special action, and
+    ///   no resolution-scoped window plays lands;
+    /// - any clause that states a durational scope — CR 611.2a: the permission
+    ///   lasts as long as the instruction states.
+    ///
+    /// At runtime a land//land modal DFC bound outside the graveyard also keeps
+    /// a lingering grant (CR 712.12 election — follow-up).
     LingeringPermission,
     /// CR 608.2g: cast exactly ONE card as the granting ability resolves. The
     /// self-library-peek form ("look at the top four cards of your library. You
