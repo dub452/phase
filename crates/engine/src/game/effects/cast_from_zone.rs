@@ -1315,8 +1315,9 @@ pub(crate) fn exiled_by_source_fallback_binding(
 
 /// CR 608.2g + CR 701.18b: the cardinality authority for a free
 /// `DuringResolution` instruction. It executes as the ability resolves only for
-/// exactly one bound card; any other binding (e.g. a plural "them", or a linked
-/// exile holding several cards) takes [`grant_lingering_permissions`]. Read by
+/// exactly one bound card; any other binding of a free instruction (e.g. a
+/// plural "them", or a linked exile holding several cards) takes
+/// [`grant_lingering_permissions`]. Read by
 /// both [`resolve`] and the optional-effect feasibility probe so they cannot
 /// disagree about which route a binding takes.
 pub(crate) fn single_resolution_card(target_ids: &[ObjectId]) -> Option<ObjectId> {
