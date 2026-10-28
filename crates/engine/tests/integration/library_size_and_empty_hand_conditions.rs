@@ -8,6 +8,10 @@
 //!   (CR 611.3a + CR 613.4c).
 //! - Howltooth Hollow: "… if each player has no cards in hand." — a universal
 //!   over every player's hand (CR 102.1 + CR 402.3), checked on resolution.
+//!
+//! When the condition holds, the hidden card is played AS THE ABILITY RESOLVES
+//! (CR 701.18b): a spell is cast then (CR 608.2g) and a land is played then,
+//! subject to the land allowance and turn (CR 305.2a + CR 305.2b + CR 305.3).
 
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
@@ -30,6 +34,10 @@ const HOWLTOOTH_HOLLOW: &str = "Hideaway 4 (When this land enters, look at the t
 
 const MILL_ONE: &str = "Target player mills a card.";
 const DRAW_ONE: &str = "Draw a card.";
+const GAIN_THREE: &str = "You gain 3 life.";
+const EXTRA_LAND: &str = "You may play an additional land on each of your turns.";
+
+const STARTING_LIFE: i32 = 20;
 
 fn seed_library(scenario: &mut GameScenario, player: PlayerId, count: usize) {
     for i in 0..count {
@@ -50,6 +58,27 @@ fn free_instant(scenario: &mut GameScenario, name: &str, text: &str) -> ObjectId
         .id()
 }
 
+/// A real, castable hidden spell with an observable resolution: an instant
+/// whose printed cost is never paid, so a free cast is visible in the pool.
+fn stage_instant(scenario: &mut GameScenario) -> ObjectId {
+    scenario
+        .add_spell_to_library_top(P0, "Hidden Insight", true)
+        .from_oracle_text(GAIN_THREE)
+        .with_mana_cost(ManaCost::generic(3))
+        .id()
+}
+
+/// A real hidden land.
+fn stage_land(scenario: &mut GameScenario) -> ObjectId {
+    scenario.add_land_to_library_top(P0, "Hidden Land").id()
+}
+
+/// A second land drop for P0, so a hidden land is legal to play after the
+/// Hideaway land itself used the turn's first one (CR 305.2a).
+fn extra_land_drop(scenario: &mut GameScenario) {
+    scenario.add_enchantment_from_oracle(P0, "Extra Land", EXTRA_LAND);
+}
+
 fn library_sizes(runner: &GameRunner) -> Vec<usize> {
     runner
         .state()
@@ -68,6 +97,16 @@ fn hand_sizes(runner: &GameRunner) -> Vec<usize> {
         .collect()
 }
 
+fn lands_played(runner: &GameRunner, player: PlayerId) -> u8 {
+    runner
+        .state()
+        .players
+        .iter()
+        .find(|p| p.id == player)
+        .expect("player exists")
+        .lands_played_this_turn
+}
+
 /// A Hideaway land P0 has played, with the card it hid.
 struct HideawayBoard {
     runner: GameRunner,
@@ -75,15 +114,17 @@ struct HideawayBoard {
     hidden: ObjectId,
 }
 
-/// P0 plays the Hideaway land from hand and drives its CR 702.75a trigger,
-/// hiding the first offered card. Each player's library is seeded with
-/// `libraries[i]` cards — P0's with one extra, because Hideaway exiles one of
-/// them — and each hand with `hands[i]` cards besides the land itself.
+/// P0 plays the Hideaway land from hand (this turn's land drop) and drives its
+/// CR 702.75a trigger, hiding the card `stage` creates. Each player's library
+/// is seeded with `libraries[i]` cards — P0's plus the staged card, which is
+/// re-seated on top so Hideaway sees it and exiles it — and each hand with
+/// `hands[i]` cards besides the land itself.
 fn hideaway_land_board(
     name: &str,
     oracle: &str,
     libraries: &[usize],
     hands: &[usize],
+    stage: impl FnOnce(&mut GameScenario) -> ObjectId,
     extras: impl FnOnce(&mut GameScenario),
 ) -> HideawayBoard {
     let player_count = u8::try_from(libraries.len()).expect("small player count");
@@ -95,12 +136,13 @@ fn hideaway_land_board(
         .id();
     for (index, (&library, &hand)) in libraries.iter().zip(hands).enumerate() {
         let player = PlayerId(u8::try_from(index).expect("small player index"));
-        let extra = usize::from(player == P0);
-        seed_library(&mut scenario, player, library + extra);
+        seed_library(&mut scenario, player, library);
         seed_hand(&mut scenario, player, hand);
     }
+    let hidden = stage(&mut scenario);
     extras(&mut scenario);
     let mut runner = scenario.build();
+    put_on_top(&mut runner, P0, hidden);
 
     let card_id = runner.state().objects[&land].card_id;
     runner
@@ -109,20 +151,22 @@ fn hideaway_land_board(
             card_id,
         })
         .expect("playing the Hideaway land must be legal");
-    let mut hidden = None;
+    let mut hid = false;
     for _ in 0..80 {
         match runner.state().waiting_for.clone() {
             WaitingFor::DigChoice { cards, .. } => {
-                hidden = Some(cards[0]);
+                assert!(
+                    cards.contains(&hidden),
+                    "reach-guard: the staged card is seen"
+                );
                 runner
                     .act(GameAction::SelectCards {
-                        cards: vec![cards[0]],
+                        cards: vec![hidden],
                     })
-                    .expect("hiding a card");
+                    .expect("hiding the staged card");
+                hid = true;
             }
-            WaitingFor::Priority { .. } if runner.state().stack.is_empty() && hidden.is_some() => {
-                break
-            }
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() && hid => break,
             WaitingFor::Priority { .. } => {
                 runner
                     .act(GameAction::PassPriority)
@@ -131,8 +175,9 @@ fn hideaway_land_board(
             other => panic!("unexpected prompt while hiding a card: {other:?}"),
         }
     }
-    let hidden = hidden.expect("the Hideaway trigger offered a DigChoice");
+    assert!(hid, "the Hideaway trigger offered a DigChoice");
     assert_eq!(runner.state().priority_player, P0);
+    assert_eq!(lands_played(&runner, P0), 1, "reach-guard: the land drop");
 
     // "This land enters tapped." The scenario stays on this turn so no draw
     // step moves the seeded library and hand sizes; untap directly instead of
@@ -144,11 +189,26 @@ fn hideaway_land_board(
         .expect("land exists")
         .tapped = false;
 
-    HideawayBoard {
+    let board = HideawayBoard {
         runner,
         land,
         hidden,
-    }
+    };
+    assert_hidden_by_land(&board);
+    board
+}
+
+/// Re-seat `id` on top of `player`'s library (`library[0]` is the top).
+fn put_on_top(runner: &mut GameRunner, player: PlayerId, id: ObjectId) {
+    let library = &mut runner
+        .state_mut()
+        .players
+        .iter_mut()
+        .find(|p| p.id == player)
+        .expect("player exists")
+        .library;
+    library.retain(|card| *card != id);
+    library.insert(0, id);
 }
 
 fn fund(runner: &mut GameRunner, mana: ManaType) {
@@ -157,29 +217,45 @@ fn fund(runner: &mut GameRunner, mana: ManaType) {
         .add(ManaUnit::new(mana, ObjectId(0), false, vec![]));
 }
 
-/// Activates the land's "{X}, {T}: You may play the exiled card …" ability
-/// (index 1, after the mana ability), passes priority until the stack is empty,
-/// accepting the optional offer if it appears. Returns whether it appeared.
-fn activate_play_ability(runner: &mut GameRunner, land: ObjectId) -> bool {
-    runner
+/// What one drive of the resolving "you may play the exiled card" observed.
+struct Drive {
+    offered: bool,
+    /// The hidden card's zone immediately after the optional decision.
+    zone_after_decision: Option<Zone>,
+}
+
+/// Funds and activates the land's "{X}, {T}: You may play the exiled card …"
+/// ability (index 1, after the mana ability), then settles the stack,
+/// answering the optional offer with `accept`.
+fn activate_play_ability(board: &mut HideawayBoard, mana: ManaType, accept: bool) -> Drive {
+    fund(&mut board.runner, mana);
+    board
+        .runner
         .act(GameAction::ActivateAbility {
-            source_id: land,
+            source_id: board.land,
             ability_index: 1,
             payment_mode: CastPaymentMode::Auto,
         })
         .expect("CR 602.5: the play ability is activatable whatever the condition");
-    settle_stack_accepting_offer(runner)
+    settle(board, accept)
 }
 
-fn settle_stack_accepting_offer(runner: &mut GameRunner) -> bool {
-    let mut offered = false;
+/// Pass priority until the stack is empty, answering the optional offer with
+/// `accept`.
+fn settle(board: &mut HideawayBoard, accept: bool) -> Drive {
+    let mut drive = Drive {
+        offered: false,
+        zone_after_decision: None,
+    };
+    let runner = &mut board.runner;
     for _ in 0..80 {
         match runner.state().waiting_for.clone() {
             WaitingFor::OptionalEffectChoice { .. } => {
-                offered = true;
+                drive.offered = true;
                 runner
-                    .act(GameAction::DecideOptionalEffect { accept: true })
-                    .expect("accepting the offer");
+                    .act(GameAction::DecideOptionalEffect { accept })
+                    .expect("answering the offer");
+                drive.zone_after_decision = Some(runner.state().objects[&board.hidden].zone);
             }
             WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
             WaitingFor::Priority { .. } => {
@@ -190,40 +266,35 @@ fn settle_stack_accepting_offer(runner: &mut GameRunner) -> bool {
             other => panic!("unexpected prompt while resolving the ability: {other:?}"),
         }
     }
-    assert!(
-        runner.state().stack.is_empty(),
-        "the stack must settle after the ability resolves"
-    );
-    offered
+    drive
 }
 
-fn may_play_from_source(board: &HideawayBoard) -> bool {
-    board.runner.state().objects[&board.hidden]
-        .casting_permissions
-        .iter()
-        .any(|p| {
-            matches!(
-                p,
-                CastingPermission::PlayFromExile {
-                    source_id: Some(src),
-                    ..
-                } if *src == board.land
-            )
+/// Every casting permission sourced from the Hideaway land, on any object.
+fn permissions_from_land(board: &HideawayBoard) -> Vec<(ObjectId, CastingPermission)> {
+    board
+        .runner
+        .state()
+        .objects
+        .values()
+        .flat_map(|obj| {
+            obj.casting_permissions
+                .iter()
+                .filter(|p| {
+                    matches!(
+                        p,
+                        CastingPermission::PlayFromExile { source_id: Some(src), .. }
+                            if *src == board.land
+                    )
+                })
+                .map(|p| (obj.id, p.clone()))
+                .collect::<Vec<_>>()
         })
+        .collect()
 }
 
-/// Reach-guard for every "not offered" row: the activation went through (land
-/// tapped, mana spent, stack settled) and the hidden card is still the land's
-/// face-down Hideaway card, so the refusal came from the resolution-time
-/// condition and not from an upstream short-circuit.
-fn assert_resolved_without_offer(board: &HideawayBoard, offered: bool) {
+/// The hidden card is still the land's face-down, ungranted Hideaway card.
+fn assert_hidden_by_land(board: &HideawayBoard) {
     let state = board.runner.state();
-    assert!(state.objects[&board.land].tapped, "the {{T}} cost was paid");
-    assert_eq!(
-        state.players[0].mana_pool.total(),
-        0,
-        "the mana cost was paid"
-    );
     let hidden = &state.objects[&board.hidden];
     assert_eq!(hidden.zone, Zone::Exile);
     assert!(hidden.face_down);
@@ -233,51 +304,140 @@ fn assert_resolved_without_offer(board: &HideawayBoard, offered: bool) {
             && matches!(link.kind, ExileLinkKind::HideawayLookable { .. })
     }));
     assert!(
-        !offered,
-        "the condition is false on resolution: no \"you may play\" offer"
-    );
-    assert!(
-        !may_play_from_source(board),
-        "the condition is false on resolution: no play permission"
+        hidden.casting_permissions.is_empty(),
+        "the hidden card carries no play permission"
     );
 }
 
-fn assert_resolved_with_offer(board: &HideawayBoard, offered: bool) {
+/// CR 608.2n: the ability's resolution completed — costs paid, the stack is
+/// empty, and the game is back at a priority window.
+fn assert_ability_completed(board: &HideawayBoard) {
+    let state = board.runner.state();
+    assert!(state.objects[&board.land].tapped, "the {{T}} cost was paid");
+    assert_eq!(
+        state.players[0].mana_pool.total(),
+        0,
+        "the mana cost was paid and the hidden card's cost was not"
+    );
+    assert!(state.stack.is_empty(), "the ability left the stack");
     assert!(
-        offered,
+        matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "the continuation ends at priority, got {:?}",
+        state.waiting_for
+    );
+    assert!(
+        permissions_from_land(board).is_empty(),
+        "nothing lingers: no play permission from the land"
+    );
+}
+
+/// Reach-guard for every "not offered" row: the activation went through and
+/// the hidden card — a real playable instant — is still the land's face-down
+/// Hideaway card, so the refusal came from the resolution-time condition and
+/// not from an upstream short-circuit.
+fn assert_resolved_without_offer(board: &HideawayBoard, drive: &Drive) {
+    assert!(
+        !drive.offered,
+        "the condition is false on resolution: no \"you may play\" offer"
+    );
+    assert_ability_completed(board);
+    assert_hidden_by_land(board);
+    assert_eq!(
+        board.runner.state().players[0].life,
+        STARTING_LIFE,
+        "nothing was cast"
+    );
+}
+
+/// CR 701.18b + CR 608.2g + CR 608.2n: the hidden instant was cast during the
+/// ability's resolution, for free, and resolved into its owner's graveyard —
+/// never left in exile behind a lingering permission.
+fn assert_hidden_spell_cast(board: &HideawayBoard, drive: &Drive) {
+    assert!(
+        drive.offered,
         "the condition is true on resolution: the offer appears"
     );
-    assert!(
-        may_play_from_source(board),
-        "accepting grants the play permission for the land's hidden card"
+    assert_eq!(
+        drive.zone_after_decision,
+        Some(Zone::Stack),
+        "CR 608.2g: the hidden spell is cast while the ability resolves"
     );
+    let state = board.runner.state();
+    assert_eq!(
+        state.players[0].life,
+        STARTING_LIFE + 3,
+        "the hidden instant resolved: \"You gain 3 life.\""
+    );
+    let hidden = &state.objects[&board.hidden];
+    assert_eq!(hidden.zone, Zone::Graveyard);
+    assert!(!hidden.face_down);
+    assert!(
+        !state
+            .exile_links
+            .iter()
+            .any(|link| link.exiled_id == board.hidden),
+        "the Hideaway link ended with the card leaving exile"
+    );
+    assert_ability_completed(board);
+}
+
+/// CR 701.18b + CR 305.2a: the hidden land was played during the ability's
+/// resolution, entering face up under P0's control and counting as a land play.
+fn assert_hidden_land_played(board: &HideawayBoard, drive: &Drive, lands_before: u8) {
+    assert!(drive.offered, "the offer appears for a playable land");
+    let state = board.runner.state();
+    let land = &state.objects[&board.hidden];
+    assert_eq!(land.zone, Zone::Battlefield);
+    assert!(!land.face_down, "a played land enters face up");
+    assert_eq!(land.controller, P0);
+    assert_eq!(
+        lands_played(&board.runner, P0),
+        lands_before + 1,
+        "CR 305.2a: the land played during resolution counts as a land play"
+    );
+    assert_ability_completed(board);
 }
 
 /// Shelldock Isle with the given per-player library sizes at activation.
-fn activate_shelldock(libraries: &[usize]) -> (HideawayBoard, bool) {
+fn shelldock_board(
+    libraries: &[usize],
+    stage: impl FnOnce(&mut GameScenario) -> ObjectId,
+    extras: impl FnOnce(&mut GameScenario),
+) -> HideawayBoard {
     let hands = vec![0; libraries.len()];
-    let mut board =
-        hideaway_land_board("Shelldock Isle", SHELLDOCK_ISLE, libraries, &hands, |_| {});
-    fund(&mut board.runner, ManaType::Blue);
+    let board = hideaway_land_board(
+        "Shelldock Isle",
+        SHELLDOCK_ISLE,
+        libraries,
+        &hands,
+        stage,
+        extras,
+    );
     assert_eq!(library_sizes(&board.runner), libraries, "reach-guard");
-    let offered = activate_play_ability(&mut board.runner, board.land);
-    (board, offered)
+    board
+}
+
+fn activate_shelldock(libraries: &[usize], accept: bool) -> (HideawayBoard, Drive) {
+    let mut board = shelldock_board(libraries, stage_instant, |_| {});
+    let drive = activate_play_ability(&mut board, ManaType::Blue, accept);
+    (board, drive)
 }
 
 /// CR 400.1 + CR 401.3 + CR 608.2c: with every library above twenty cards the
 /// condition is false on resolution — the ability resolves and offers nothing.
 #[test]
 fn shelldock_isle_offers_nothing_when_every_library_has_more_than_twenty_cards() {
-    let (board, offered) = activate_shelldock(&[21, 21]);
-    assert_resolved_without_offer(&board, offered);
+    let (board, drive) = activate_shelldock(&[21, 21], true);
+    assert_resolved_without_offer(&board, &drive);
 }
 
 /// CR 400.1 + CR 401.3: ANY player's library qualifies — an opponent's library
-/// at twenty cards satisfies "a library", though the controller's has 21.
+/// at twenty cards satisfies "a library", though the controller's has 21; the
+/// hidden spell is cast during the resolution (CR 608.2g).
 #[test]
-fn shelldock_isle_offers_play_when_an_opponents_library_has_twenty_cards() {
-    let (board, offered) = activate_shelldock(&[21, 20]);
-    assert_resolved_with_offer(&board, offered);
+fn shelldock_isle_casts_its_hidden_spell_when_an_opponents_library_has_twenty_cards() {
+    let (board, drive) = activate_shelldock(&[21, 20], true);
+    assert_hidden_spell_cast(&board, &drive);
 }
 
 /// CR 400.1: each library is checked on its own, never summed — two libraries
@@ -286,27 +446,22 @@ fn shelldock_isle_offers_play_when_an_opponents_library_has_twenty_cards() {
 #[test]
 fn shelldock_isle_checks_each_library_separately() {
     for libraries in [[15, 15], [20, 21]] {
-        let (board, offered) = activate_shelldock(&libraries);
-        assert_resolved_with_offer(&board, offered);
+        let (board, drive) = activate_shelldock(&libraries, true);
+        assert_hidden_spell_cast(&board, &drive);
     }
 }
 
 /// CR 608.2c + CR 602.5: the condition is read when the ability resolves, not
 /// when it is activated — with both libraries at 21 on activation, milling the
-/// opponent to twenty in response makes the offer appear.
+/// opponent to twenty in response makes the hidden spell castable.
 #[test]
 fn shelldock_isle_checks_library_size_on_resolution_not_activation() {
     let mut mill = None;
-    let mut board = hideaway_land_board(
-        "Shelldock Isle",
-        SHELLDOCK_ISLE,
-        &[21, 21],
-        &[0, 0],
-        |scenario| mill = Some(free_instant(scenario, "Mill One", MILL_ONE)),
-    );
+    let mut board = shelldock_board(&[21, 21], stage_instant, |scenario| {
+        mill = Some(free_instant(scenario, "Mill One", MILL_ONE));
+    });
     let mill = mill.expect("mill helper staged");
     fund(&mut board.runner, ManaType::Blue);
-    assert_eq!(library_sizes(&board.runner), [21, 21], "reach-guard");
     board
         .runner
         .act(GameAction::ActivateAbility {
@@ -323,14 +478,100 @@ fn shelldock_isle_checks_library_size_on_resolution_not_activation() {
 
     board.runner.cast(mill).target_player(P1).commit();
     assert_eq!(board.runner.state().stack.len(), 2, "the mill responds");
-    let offered = settle_stack_accepting_offer(&mut board.runner);
+    let drive = settle(&mut board, true);
 
     assert_eq!(
         library_sizes(&board.runner),
         [21, 20],
         "the mill resolved first"
     );
-    assert_resolved_with_offer(&board, offered);
+    assert_hidden_spell_cast(&board, &drive);
+}
+
+/// CR 608.2c: declining the optional play leaves the hidden spell face down in
+/// exile, still linked to Shelldock Isle, with no lingering permission.
+#[test]
+fn declining_shelldock_isles_play_leaves_the_card_hidden() {
+    let (board, drive) = activate_shelldock(&[21, 20], false);
+    assert!(drive.offered, "reach-guard: the condition held and offered");
+    assert_eq!(drive.zone_after_decision, Some(Zone::Exile));
+    assert_ability_completed(&board);
+    assert_hidden_by_land(&board);
+    assert_eq!(
+        board.runner.state().players[0].life,
+        STARTING_LIFE,
+        "nothing was cast"
+    );
+}
+
+/// CR 701.18b + CR 305.2a: with a land drop left and the condition met, the
+/// hidden land is played during the resolution.
+#[test]
+fn shelldock_isle_plays_its_hidden_land_during_resolution() {
+    let mut board = shelldock_board(&[21, 20], stage_land, extra_land_drop);
+    let lands_before = lands_played(&board.runner, P0);
+    let drive = activate_play_ability(&mut board, ManaType::Blue, true);
+    assert_hidden_land_played(&board, &drive, lands_before);
+}
+
+/// CR 305.2b: with the condition met but the land drop already used (by
+/// Shelldock Isle itself), the hidden land can't be played — no offer, and it
+/// stays hidden.
+#[test]
+fn shelldock_isle_offers_nothing_for_a_hidden_land_at_the_land_allowance() {
+    let mut board = shelldock_board(&[21, 20], stage_land, |_| {});
+    let drive = activate_play_ability(&mut board, ManaType::Blue, true);
+    assert!(!drive.offered, "CR 305.2b: no offer for an unplayable land");
+    assert_ability_completed(&board);
+    assert_hidden_by_land(&board);
+    assert_eq!(lands_played(&board.runner, P0), 1);
+}
+
+/// Pass the game forward to `player`'s precombat main phase with an empty
+/// stack, handing `holder` priority there.
+fn advance_to_main_of(runner: &mut GameRunner, player: PlayerId, holder: PlayerId) {
+    let start_turn = runner.state().turn_number;
+    for _ in 0..300 {
+        let state = runner.state();
+        if state.turn_number > start_turn
+            && state.active_player == player
+            && state.phase == Phase::PreCombatMain
+            && state.stack.is_empty()
+            && matches!(state.waiting_for, WaitingFor::Priority { player: p } if p == holder)
+        {
+            return;
+        }
+        match state.waiting_for.clone() {
+            WaitingFor::DeclareAttackers { .. } => runner
+                .act(GameAction::DeclareAttackers {
+                    attacks: vec![],
+                    bands: vec![],
+                })
+                .expect("declaring no attackers"),
+            _ => runner
+                .act(GameAction::PassPriority)
+                .expect("passing priority"),
+        };
+    }
+    panic!("never reached {player:?}'s main phase with {holder:?} holding priority");
+}
+
+/// CR 305.3: on an opponent's turn the hidden land can't be played, even with
+/// a land drop to spare and the condition met — no offer, and it stays hidden.
+#[test]
+fn shelldock_isle_offers_nothing_for_a_hidden_land_on_an_opponents_turn() {
+    let mut board = shelldock_board(&[15, 15], stage_land, extra_land_drop);
+    advance_to_main_of(&mut board.runner, P1, P0);
+    assert_eq!(board.runner.state().active_player, P1, "reach-guard");
+    assert!(
+        library_sizes(&board.runner).iter().any(|&n| n <= 20),
+        "reach-guard: the condition still holds"
+    );
+    let drive = activate_play_ability(&mut board, ManaType::Blue, true);
+    assert!(!drive.offered, "CR 305.3: no offer for a land on P1's turn");
+    assert_ability_completed(&board);
+    assert_hidden_by_land(&board);
+    assert_eq!(lands_played(&board.runner, P0), 0);
 }
 
 fn isleback_board(
@@ -427,47 +668,48 @@ fn isleback_spawn_ignores_a_departed_players_library() {
 }
 
 /// Howltooth Hollow with the given per-player hand sizes at activation (the
-/// land itself has already left P0's hand).
-fn activate_howltooth(hands: &[usize]) -> (HideawayBoard, bool) {
+/// land itself has already left P0's hand), hiding a real instant.
+fn activate_howltooth(hands: &[usize]) -> (HideawayBoard, Drive) {
     let libraries = vec![8; hands.len()];
     let mut board = hideaway_land_board(
         "Howltooth Hollow",
         HOWLTOOTH_HOLLOW,
         &libraries,
         hands,
+        stage_instant,
         |_| {},
     );
-    fund(&mut board.runner, ManaType::Black);
     assert_eq!(hand_sizes(&board.runner), hands, "reach-guard");
-    let offered = activate_play_ability(&mut board.runner, board.land);
-    (board, offered)
+    let drive = activate_play_ability(&mut board, ManaType::Black, true);
+    (board, drive)
 }
 
 /// CR 102.1 + CR 402.3 + CR 608.2c: "each player has no cards in hand" is
 /// false while an opponent holds a card.
 #[test]
 fn howltooth_hollow_offers_nothing_while_an_opponent_holds_a_card() {
-    let (board, offered) = activate_howltooth(&[0, 1]);
-    assert_resolved_without_offer(&board, offered);
+    let (board, drive) = activate_howltooth(&[0, 1]);
+    assert_resolved_without_offer(&board, &drive);
 }
 
-/// CR 102.1 + CR 608.2c: with every hand empty on resolution the offer appears.
+/// CR 102.1 + CR 608.2c + CR 608.2g: with every hand empty on resolution the
+/// hidden spell is cast during the resolution.
 #[test]
-fn howltooth_hollow_offers_play_when_every_hand_is_empty() {
-    let (board, offered) = activate_howltooth(&[0, 0]);
-    assert_resolved_with_offer(&board, offered);
+fn howltooth_hollow_casts_its_hidden_spell_when_every_hand_is_empty() {
+    let (board, drive) = activate_howltooth(&[0, 0]);
+    assert_hidden_spell_cast(&board, &drive);
 }
 
 /// CR 102.1: "each player" includes the controller.
 #[test]
 fn howltooth_hollow_offers_nothing_while_its_controller_holds_a_card() {
-    let (board, offered) = activate_howltooth(&[1, 0]);
-    assert_resolved_without_offer(&board, offered);
+    let (board, drive) = activate_howltooth(&[1, 0]);
+    assert_resolved_without_offer(&board, &drive);
 }
 
 /// CR 102.1: "each player" spans every player in a multiplayer game.
 #[test]
 fn howltooth_hollow_offers_nothing_while_any_one_of_three_players_holds_a_card() {
-    let (board, offered) = activate_howltooth(&[0, 0, 1]);
-    assert_resolved_without_offer(&board, offered);
+    let (board, drive) = activate_howltooth(&[0, 0, 1]);
+    assert_resolved_without_offer(&board, &drive);
 }
