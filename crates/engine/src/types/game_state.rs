@@ -17655,7 +17655,11 @@ pub enum WaitingFor {
     /// play-land action), and (b) both faces are spells (CR 712.11b — e.g.
     /// Esika, God of the Tree // The Prismatic Bridge and the other Kaldheim
     /// gods — where the player picks which face to cast before it goes on the
-    /// stack). The `ChooseModalFace` handler routes the post-choice re-entry
+    /// stack). A third case is resolution-owned: (c) a spell//land MDFC under a
+    /// no-duration Play instruction (CR 701.18b — Djinn of Wishes, Hideaway),
+    /// whose player casts the spell face or plays the land face during
+    /// resolution, each offered only while legal (CR 712.11c + CR 712.12).
+    /// The `ChooseModalFace` handler routes the post-choice re-entry
     /// by the now-active face's type (land → play-land, spell → cast).
     /// `payment_mode` carries the manual/auto mana mode forward into the
     /// spell-cast re-entry (ignored for the land path, which is always Auto).
