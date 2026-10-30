@@ -13265,7 +13265,7 @@ fn resolution_spell_land_board(
     (state, card)
 }
 
-/// Put a P0 permanent carrying a "can't play lands" static (CR 305.2) onto
+/// Put a P0 permanent carrying a "can't play lands" static (CR 101.2) onto
 /// the battlefield.
 fn add_cant_play_land_static(state: &mut GameState, card_id: u64) {
     let source = create_object(
@@ -13312,7 +13312,7 @@ fn play_land_face_during_resolution_enters_by_its_back_face() {
     )));
 }
 
-/// B6b — CR 712.12 + CR 305.2 + CR 305.2b + CR 305.3: the land face of a
+/// B6b — CR 712.12 + CR 101.2 + CR 305.2b + CR 305.3: the land face of a
 /// spell//land card may be played during resolution only for a modal land back
 /// face, on the player's turn, with no "can't play lands" prohibition, and
 /// below the allowance.
@@ -13375,6 +13375,6 @@ fn resolution_back_land_face_play_is_legal_requires_a_modal_land_back_turn_and_a
     );
     assert!(
         !resolution_back_land_face_play_is_legal(&prohibited, PlayerId(0), card),
-        "CR 305.2: a \"can't play lands\" static refuses the land face"
+        "CR 101.2: a \"can't play lands\" static refuses the land face"
     );
 }

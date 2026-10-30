@@ -59155,7 +59155,7 @@ mod tests {
             let now = play_instruction(source, Some(card), CastFromZoneDriver::DuringResolution);
             assert!(
                 optional_effect_is_infeasible(&state, &with_mv_zero_constraint(now)),
-                "{zone:?}: CR 305.2 prohibition + illegal spell face, no offer"
+                "{zone:?}: CR 101.2 prohibition + illegal spell face, no offer"
             );
         }
     }

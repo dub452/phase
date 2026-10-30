@@ -1115,7 +1115,7 @@ fn djinn_casts_the_spell_face_of_a_revealed_spell_land_card_during_resolution() 
     assert_eq!(state.players[0].mana_pool.total(), 0);
 }
 
-/// A P0 battlefield permanent gains a "can't play lands" static (CR 305.2) for
+/// A P0 battlefield permanent gains a "can't play lands" static (CR 101.2) for
 /// `player` (its controller), refreshed through the layer system.
 fn forbid_land_play(runner: &mut GameRunner, host: ObjectId, player: PlayerId) {
     {
@@ -1474,7 +1474,7 @@ fn djinn_on_an_opponents_turn_casts_the_spell_face_of_a_spell_land_card() {
     assert_eq!(lands_played(&board.runner, P0), 0);
 }
 
-/// I12 — CR 305.2: under a "can't play lands" prohibition the land face is not
+/// I12 — CR 101.2: under a "can't play lands" prohibition the land face is not
 /// offered, so the spell face is cast with no face prompt (I1 is the same
 /// board without the prohibition).
 #[test]
@@ -1496,7 +1496,7 @@ fn djinn_does_not_offer_the_land_face_under_a_cant_play_land_prohibition() {
     assert!(drive.offered);
     assert!(
         !drive.face_choice_seen,
-        "CR 305.2: the land face is not offered"
+        "CR 101.2: the land face is not offered"
     );
     let state = board.runner.state();
     assert_eq!(state.objects[&victim].zone, Zone::Graveyard);
@@ -1508,7 +1508,7 @@ fn djinn_does_not_offer_the_land_face_under_a_cant_play_land_prohibition() {
     assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
 }
 
-/// I13 — CR 305.2 + CR 608.2d: under a "can't play lands" prohibition a Hagra
+/// I13 — CR 101.2 + CR 608.2d: under a "can't play lands" prohibition a Hagra
 /// Mauling with no creature to target (Djinn has shroud) has no legal face: no
 /// offer, and it is exiled (I3 is the same board without the prohibition).
 #[test]

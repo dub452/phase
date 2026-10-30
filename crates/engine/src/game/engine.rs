@@ -18662,7 +18662,7 @@ fn elect_modal_land_back_face(obj: &mut crate::game::game_object::GameObject) {
     obj.modal_back_face = true;
 }
 
-/// CR 712.12 + CR 305.2a + CR 305.2b + CR 305.3: whether `player` may play the
+/// CR 712.12 + CR 305.2a + CR 305.2b + CR 305.3 + CR 101.2: whether `player` may play the
 /// land back face of the spell//land modal double-faced card `object_id` while
 /// an instructing ability resolves. The object's front face is not a land
 /// (CR 712.8a: outside the battlefield and stack it has only its front face's
