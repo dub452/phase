@@ -17523,7 +17523,8 @@ pub(super) fn initiate_cast_during_resolution(
 ) -> Result<ResolutionCastInitiation, EngineError> {
     match initiate_resolution_election(state, player, hit_card, request, events)? {
         ResolutionElectionInitiation::Cast(initiation) => Ok(initiation),
-        // CR 601.2 + CR 305.9: a Cast instruction never plays a land.
+        // CR 701.18b + CR 601.2: only a Play instruction can play a land; a
+        // Cast instruction never does.
         // `resolution_land_face_admission` requires a Play policy, so this is
         // a typed refusal for a mis-built request rather than a reachable arm.
         ResolutionElectionInitiation::PlayLandFace(_) => Err(EngineError::InvalidAction(

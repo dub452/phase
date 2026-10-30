@@ -17659,8 +17659,11 @@ pub enum WaitingFor {
     /// no-duration Play instruction (CR 701.18b — Djinn of Wishes, Hideaway),
     /// whose player casts the spell face or plays the land face during
     /// resolution, each offered only while legal (CR 712.11c + CR 712.12).
-    /// The `ChooseModalFace` handler routes the post-choice re-entry
-    /// by the now-active face's type (land → play-land, spell → cast).
+    /// Outside a resolution, the `ChooseModalFace` handler routes the
+    /// post-choice re-entry by the now-active face's type (land → play-land,
+    /// spell → cast). In case (c), an admitted land face is played by
+    /// `engine_resolution_choices::complete_resolution_land_face_choice`, and
+    /// a spell face continues the resolution cast.
     /// `payment_mode` carries the manual/auto mana mode forward into the
     /// spell-cast re-entry (ignored for the land path, which is always Auto).
     /// A resolution-owned paid cast may also carry a cost added to the elected
