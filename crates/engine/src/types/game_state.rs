@@ -23538,6 +23538,8 @@ declare_game_state! {
     pub sideboard_submitted: Vec<PlayerId>,
 
     // Trigger constraint tracking keyed by exact source incarnation + occurrence.
+    /// CR 603.2: once-each-turn limits spent by triggering
+    /// (`OncePerTurn { spent_by: Triggering }`).
     #[serde(default)]
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
     pub triggers_fired_this_turn: HashSet<TriggerDefinitionRef>,
@@ -23554,6 +23556,16 @@ declare_game_state! {
     #[serde(default)]
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
     pub triggers_fired_this_turn_per_opponent: HashSet<(TriggerDefinitionRef, PlayerId)>,
+    /// CR 603.2h: (trigger definition, player) pairs — that player, controlling that
+    /// ability, has taken its "Do this only once each turn" indicated action this turn.
+    /// Sole writer: `triggers::record_indicated_action`, on acceptance of a non-cast
+    /// instruction or when a CR 603.2h resolution cast becomes cast. Read at fire time and at resolution (incl. the
+    /// `upfront_optional_gate` authority). Cleared at turn start. Boxed: populated only
+    /// once a CR 603.2h ability's action is taken, so it keeps `GameState`'s inline size
+    /// inside the `game_state_size` stack budget.
+    #[serde(default)]
+    #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
+    pub trigger_indicated_actions_this_turn: Box<HashSet<(TriggerDefinitionRef, PlayerId)>>,
     #[serde(default)]
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
     pub triggers_fired_this_game: HashSet<TriggerDefinitionRef>,
@@ -26837,11 +26849,7 @@ pub struct TransientContinuousEffect {
     /// non-current sentinel.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_subject: Option<ObjectIncarnationRef>,
-    /// CR 611.2a + CR 400.7: the source context a `Duration::UntilEvent`
-    /// effect's event is matched against, captured when the effect is created
-    /// (as a `WhenNextEvent` delayed trigger carries one). `None` for every
-    /// other duration. Rides inside the journaled
-    /// `ResolvedContinuousEffectCommand`, so replay installs it verbatim.
+    /// CR 611.2a + CR 400.7: the source context a `Duration::UntilEvent` effect's event is matched against, captured when the effect is created (as a `WhenNextEvent` delayed trigger carries one). Where the installer passes the creating ability — today only `effect.rs::install_transient`, the GenericEffect installer — it is captured from that ability's own source (`ResolvedAbility::effect_source_ref`): the live object while it is that incarnation, else its last known information, from its departure record this turn, else the source context the ability itself carries (CR 113.7a + CR 603.7d / CR 603.7e); a newer object at the same id never stands in, and it is `None` (the deadline never matches) only when none of these exists. Every other install passes no creating ability: the three public `add_transient_continuous_effect*` wrappers and `add_simultaneous_transient_continuous_effects`, and through them the other ability-driven effect handlers. For other installs it is captured from the live source, else its terminal battlefield departure record. `None` for every other duration. Rides inside the journaled `ResolvedContinuousEffectCommand`, so replay installs it verbatim.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_event_source: Option<Box<TriggerSourceContext>>,
     /// CR 116.2c: see [`EndEffectPermission`]. `None` for every effect with no
@@ -30273,6 +30281,24 @@ impl GameState {
         })
     }
 
+    /// CR 400.7 + CR 113.7a + CR 608.2h: the zone change that took the exact
+    /// object `identity` out of the zone it was observed in this turn; its
+    /// source context is that object's last known information. An incarnation
+    /// departs at most once. `None` when it has not departed this turn (the
+    /// ledger is per-turn); callers fail closed and never substitute the
+    /// object now stored under the id.
+    pub(crate) fn incarnation_departure_record(
+        &self,
+        identity: ObjectIncarnationRef,
+    ) -> Option<&ZoneChangeRecord> {
+        self.zone_changes_this_turn.iter().find(|record| {
+            record.object_id == identity.object_id
+                && record
+                    .trigger_source_context()
+                    .is_some_and(|context| context.identity.reference == identity)
+        })
+    }
+
     /// CR 701.50b + CR 400.7: The conniver as it LAST EXISTED on the
     /// battlefield, for a connive whose performer left before the action ran
     /// (and may have returned as a new object at the same storage id).
@@ -30297,13 +30323,7 @@ impl GameState {
             .lki_by_incarnation
             .get(&object_id)
             .and_then(|history| history.get(&identity.incarnation))?;
-        let departure = self.zone_changes_this_turn.iter().find(|record| {
-            record.object_id == object_id
-                && record
-                    .trigger_source_context
-                    .as_ref()
-                    .is_some_and(|context| context.identity.reference == identity)
-        });
+        let departure = self.incarnation_departure_record(identity);
         let context = departure.and_then(|record| record.trigger_source_context.as_ref());
         let entered_this_turn = self.zone_changes_this_turn.iter().any(|record| {
             record.object_id == object_id
@@ -31975,6 +31995,7 @@ impl GameState {
             triggers_fired_this_turn: HashSet::new(),
             trigger_fire_counts_this_turn: HashMap::new(),
             triggers_fired_this_turn_per_opponent: HashSet::new(),
+            trigger_indicated_actions_this_turn: Box::default(),
             triggers_fired_this_game: HashSet::new(),
             triggered_abilities_added_mana_this_turn: HashSet::new(),
             activated_abilities_this_turn: im::HashMap::new(),
@@ -32724,6 +32745,7 @@ impl GameState {
             condition,
             None,
             TransientContinuousEffectBindings::default(),
+            None,
         )
     }
 
@@ -32749,6 +32771,7 @@ impl GameState {
             condition,
             None,
             bindings,
+            None,
         )
     }
 
@@ -32781,9 +32804,11 @@ impl GameState {
             condition,
             Some(end_permission),
             TransientContinuousEffectBindings::default(),
+            None,
         )
     }
 
+    /// CR 611.2a + CR 113.7a + CR 400.7: `creating_ability` is the ability whose resolution creates this effect; an `UntilEvent` deadline is matched against that ability's own source (see `TransientContinuousEffect::duration_event_source`). When `Some`, `source_id` is that ability's source. Only `effect.rs::install_transient`, the GenericEffect installer, passes it. Every other install passes `None`: the three public wrappers and `add_simultaneous_transient_continuous_effects`, and through them static, replacement, cost and rules-generated installs and the other ability-driven effect handlers. These latch the live source, else its terminal battlefield departure.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn add_transient_continuous_effect_inner(
         &mut self,
@@ -32795,7 +32820,9 @@ impl GameState {
         condition: Option<StaticCondition>,
         end_permission: Option<EndEffectPermission>,
         bindings: TransientContinuousEffectBindings,
+        creating_ability: Option<&ResolvedAbility>,
     ) -> Option<u64> {
+        debug_assert!(creating_ability.is_none_or(|ability| ability.source_id == source_id));
         self.transient_duration_begins(source_id, controller, &duration, &affected, bindings)
             .then(|| {
                 self.install_started_transient_continuous_effect(
@@ -32807,6 +32834,7 @@ impl GameState {
                     condition,
                     end_permission,
                     bindings,
+                    creating_ability,
                 )
             })
     }
@@ -32837,6 +32865,7 @@ impl GameState {
                     None,
                     None,
                     bindings,
+                    None,
                 );
             }
         }
@@ -32877,6 +32906,7 @@ impl GameState {
         condition: Option<StaticCondition>,
         end_permission: Option<EndEffectPermission>,
         bindings: TransientContinuousEffectBindings,
+        creating_ability: Option<&ResolvedAbility>,
     ) -> u64 {
         let id = self.next_continuous_effect_id;
         self.next_continuous_effect_id += 1;
@@ -32916,9 +32946,32 @@ impl GameState {
         // never re-read from `objects`. CR 113.7a: an activated or triggered
         // ability resolves even when its source is gone; if the source has
         // ceased to exist (CR 704.5d / CR 704.5e), its terminal battlefield
-        // departure record is the authority for it (CR 608.2i).
-        let duration_event_source = match duration {
-            Duration::UntilEvent { .. } => self
+        // departure record is the authority for it (CR 608.2h).
+        //
+        // With a creating ability — passed only by `effect.rs::install_transient`, the GenericEffect installer — the deadline binds that ability's own source (`ResolvedAbility::effect_source_ref`): the exact object while it is live, else its last known information — its departure record this turn (CR 113.7a + CR 608.2h), else the source context the ability carries across turns (CR 603.7d / CR 603.7e) — and `None` when none exists: a newer object reusing the storage id never stands in for it (CR 400.7). Every other install (the public wrappers and `add_simultaneous_transient_continuous_effects`, and through them the other ability-driven handlers) passes none: the live object at the id, else its terminal battlefield departure.
+        let duration_event_source = match (&duration, creating_ability) {
+            (Duration::UntilEvent { .. }, Some(ability)) => ability
+                .effect_source_ref(self)
+                .and_then(|source| {
+                    self.objects
+                        .get(&source.object_id)
+                        .filter(|object| object.incarnation == source.incarnation)
+                        .map(|object| trigger_source_context_for_latch(self, object))
+                        .or_else(|| {
+                            self.incarnation_departure_record(source)
+                                .and_then(ZoneChangeRecord::trigger_source_context)
+                                .cloned()
+                        })
+                        .or_else(|| {
+                            ability
+                                .trigger_source
+                                .as_ref()
+                                .filter(|context| context.identity.reference == source)
+                                .cloned()
+                        })
+                })
+                .map(Box::new),
+            (Duration::UntilEvent { .. }, None) => self
                 .objects
                 .get(&source_id)
                 .map(|source| trigger_source_context_for_latch(self, source))
@@ -35205,6 +35258,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         triggers_fired_this_turn: _,
         trigger_fire_counts_this_turn: _,
         triggers_fired_this_turn_per_opponent: _,
+        trigger_indicated_actions_this_turn: _,
         triggers_fired_this_game: _,
         triggered_abilities_added_mana_this_turn: _,
         activated_abilities_this_turn: _,
@@ -35581,6 +35635,8 @@ impl PartialEq for GameState {
             && self.triggers_fired_this_turn == other.triggers_fired_this_turn
             && self.trigger_fire_counts_this_turn == other.trigger_fire_counts_this_turn
             && self.triggers_fired_this_turn_per_opponent == other.triggers_fired_this_turn_per_opponent
+            && self.trigger_indicated_actions_this_turn
+                == other.trigger_indicated_actions_this_turn
             && self.triggers_fired_this_game == other.triggers_fired_this_game
             && self.triggered_abilities_added_mana_this_turn
                 == other.triggered_abilities_added_mana_this_turn
@@ -37798,6 +37854,7 @@ mod tests {
                     success_action:
                         crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
                     delayed_trigger_receipts: vec![receipt.clone()],
+                    indicated_action: None,
                 },
             },
         };
@@ -37973,6 +38030,7 @@ mod tests {
             reject_action: ResolutionMvRejectAction::RemainExiled,
             success_action: ResolutionCastSuccessAction::BottomMisses,
             delayed_trigger_receipts: Vec::new(),
+            indicated_action: None,
         };
 
         // GraveyardPaidCast — an empty rider is skipped and a carried rider
