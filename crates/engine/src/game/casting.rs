@@ -14592,8 +14592,9 @@ impl ResolutionFaceLegality {
 /// CR 701.18b + CR 712.12: whether a resolution-owned election under `policy`
 /// may elect `object_id`'s land back face. To *play* a card is to cast it or
 /// play it as a land, so only a Play instruction admits a land face (a Cast
-/// instruction never does, CR 601.2). The face choice must still be open, and
-/// the land face must be legal to play now
+/// instruction never does, CR 601.2). The face choice must still be open, the
+/// land face itself must match the instruction's filter, and it must be legal
+/// to play now
 /// ([`super::engine::resolution_back_land_face_play_is_legal`]: modal land back
 /// face, the player's turn, no prohibition, allowance open). The single
 /// land-face authority read by initiation, legal actions, and the
@@ -14604,12 +14605,31 @@ pub(crate) fn resolution_land_face_admission(
     object_id: ObjectId,
     policy: &crate::types::ability::ResolutionCastFacePolicy,
 ) -> bool {
-    policy.play_mode.is_play()
-        && state
+    if !policy.play_mode.is_play()
+        || state
             .objects
             .get(&object_id)
-            .is_some_and(|obj| !obj.cast_face_committed)
-        && super::engine::resolution_back_land_face_play_is_legal(state, player, object_id)
+            .is_none_or(|obj| obj.cast_face_committed)
+    {
+        return false;
+    }
+    // CR 712.12: the land face is judged by its own characteristics, so the
+    // instruction's filter is applied to the projected land face, as the spell
+    // path applies it to the elected spell face.
+    super::engine::project_modal_land_back_face(state, object_id).is_some_and(|projected| {
+        let context = super::filter::FilterContext::from_source_with_controller(
+            policy.source_id,
+            policy.controller,
+        );
+        let zone = projected.objects[&object_id].zone;
+        super::filter::matches_target_filter_for_zone(
+            &projected,
+            object_id,
+            zone,
+            &policy.filter,
+            &context,
+        ) && super::engine::resolution_land_play_is_legal(&projected, player, object_id)
+    })
 }
 
 /// Immutable starting point for prospective resolution casts.  A resolution

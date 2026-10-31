@@ -462,6 +462,38 @@ describe("encodeWireMessage / decodeWireMessage", () => {
       }),
     };
 
+    // A Play-mode face policy (spell//land face election under a no-duration
+    // Play instruction) carries `play_mode`; `legacyEmpty` keeps it omitted.
+    const playModeMessage: P2PMessage = {
+      ...nonempty,
+      state: buildGameState({
+        waiting_for: {
+          type: "CastOffer",
+          data: {
+            player: 0,
+            kind: {
+              type: "GraveyardPaidCast",
+              hit_card: 17,
+              cast_transformed: false,
+              cleanup: {
+                source_id: 11,
+                face_policy: {
+                  filter: { type: "Any" },
+                  source_id: 11,
+                  controller: 0,
+                  constraint: null,
+                  play_mode: "Play",
+                },
+                exiled_misses: [],
+                reject_action: { type: "RemainExiled" },
+                success_action: { type: "BottomMisses" },
+              },
+            },
+          },
+        },
+      }),
+    };
+
     // FreeCastWindow — a populated rider on the window carrier, with the
     // optional offer fields (remaining_casts / remaining_mv_budget /
     // member_pool) omitted; the round trip must keep the populated values and
@@ -496,7 +528,7 @@ describe("encodeWireMessage / decodeWireMessage", () => {
       }),
     };
 
-    for (const message of [nonempty, legacyEmpty, windowMessage]) {
+    for (const message of [nonempty, legacyEmpty, playModeMessage, windowMessage]) {
       const bytes = await encodeWireMessage(message);
       await expect(decodeWireMessage(bytes)).resolves.toEqual(message);
     }

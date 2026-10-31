@@ -18675,23 +18675,30 @@ pub(crate) fn resolution_back_land_face_play_is_legal(
     player: PlayerId,
     object_id: ObjectId,
 ) -> bool {
-    let Some(obj) = state.objects.get(&object_id) else {
-        return false;
-    };
+    project_modal_land_back_face(state, object_id)
+        .is_some_and(|projected| resolution_land_play_is_legal(&projected, player, object_id))
+}
+
+/// CR 712.12 + CR 712.8a: `state` with the land back face of the spell//land
+/// modal double-faced card `object_id` elected, so a caller can judge that face
+/// by its own characteristics. `None` when the object is absent, its front face
+/// is already a land, or it has no modal land back face.
+pub(crate) fn project_modal_land_back_face(
+    state: &GameState,
+    object_id: ObjectId,
+) -> Option<GameState> {
+    let obj = state.objects.get(&object_id)?;
     if obj
         .card_types
         .core_types
         .contains(&crate::types::card_type::CoreType::Land)
         || !modal_land_face_election_available(obj)
     {
-        return false;
+        return None;
     }
     let mut projected = state.clone();
-    let Some(projected_obj) = projected.objects.get_mut(&object_id) else {
-        return false;
-    };
-    elect_modal_land_back_face(projected_obj);
-    resolution_land_play_is_legal(&projected, player, object_id)
+    elect_modal_land_back_face(projected.objects.get_mut(&object_id)?);
+    Some(projected)
 }
 
 /// CR 701.18b + CR 712.12 + CR 305.2a + CR 116.2a: play the land back face of

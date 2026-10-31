@@ -57062,6 +57062,55 @@ fn resolution_test_face_legality(
     )
 }
 
+/// A free Play request for the spell//land fixture whose frozen policy filter
+/// is `filter`.
+fn resolution_test_filtered_play_request(filter: TargetFilter) -> ResolutionCastRequest {
+    let mut request = resolution_test_request(filter.clone());
+    request.face_policy = crate::types::ability::ResolutionCastFacePolicy::new(
+        filter,
+        ObjectId(83_021),
+        PlayerId(0),
+        None,
+    )
+    .with_play_mode(CardPlayMode::Play);
+    request.cleanup.face_policy = request.face_policy.clone();
+    request
+}
+
+/// CR 712.12 + CR 712.11c: each face of a spell//land card is judged against
+/// the Play instruction's filter by its own characteristics. A sorcery filter
+/// admits only the sorcery front; a land filter admits only the land back.
+#[test]
+fn resolution_play_filter_is_applied_to_the_land_face() {
+    use ResolutionFaceAction::{Cast, PlayLand};
+    let mut state = setup_game_at_main_phase();
+    let spell = resolution_test_spell_land(&mut state);
+
+    let sorcery_only = resolution_test_filtered_play_request(TargetFilter::Typed(
+        TypedFilter::new(TypeFilter::Sorcery),
+    ));
+    assert_eq!(
+        resolution_test_face_legality(&state, spell, &sorcery_only),
+        ResolutionFaceLegality {
+            front: Some(Cast),
+            back: None,
+        },
+        "the land face does not match a sorcery filter"
+    );
+
+    let land_only = resolution_test_filtered_play_request(TargetFilter::Typed(TypedFilter::new(
+        TypeFilter::Land,
+    )));
+    assert_eq!(
+        resolution_test_face_legality(&state, spell, &land_only),
+        ResolutionFaceLegality {
+            front: None,
+            back: Some(PlayLand),
+        },
+        "reach-guard: a land filter admits the land face"
+    );
+}
+
 /// CR 701.18b + CR 712.12 + CR 305.2b + CR 305.3: only a Play policy admits
 /// the land face of a spell//land modal card, and only while that land play
 /// is legal now. The spell face is judged independently (CR 712.11c).
